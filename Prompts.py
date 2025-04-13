@@ -4,7 +4,7 @@ class Prompts:
         pass
 
     def get_summarization_prompt(self):
-        prompt = f'''As a seasoned financial market analyst with expertise in sentiment detection, your task is to evaluate the following summarized financial news and provide a comprehensive analysis.
+        prompt = f'''As a seasoned financial market analyst with expertise in sentiment detection of the financial market news, your task is to evaluate the following summarized financial news and provide a comprehensive analysis.
 
             Please analyze the text and deliver:
             
