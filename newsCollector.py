@@ -23,6 +23,7 @@ class NewsMonitor:
         self.headlines_cache = TTLCache(maxsize=cache_size, ttl=cache_ttl)
         self.summarizer = Summarizer()
         self.notifier = Notifier()
+        self.is_first_run = True
         if sys.platform == 'win32':
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
@@ -34,6 +35,12 @@ class NewsMonitor:
             new_news_objects = []
 
             for headline, link in zip(current_headlines['headline'], current_headlines['link']):
+                # On first run, just populate the cache without processing
+                if self.is_first_run:
+                    self.headlines_cache[link] = True
+                    continue
+
+                # For subsequent runs, process new links
                 if link not in self.headlines_cache:
                     try:
                         article = Article(link)
@@ -42,10 +49,15 @@ class NewsMonitor:
 
                         news_obj = News(article)
                         new_news_objects.append(news_obj)
-                        self.headlines_cache[link] = True  # Just store a flag, not the whole object
+                        self.headlines_cache[link] = True
                     except Exception as e:
                         logger.error(f"Error processing article {link}: {e}")
                         continue
+
+            # After initial cache population, mark first run as complete
+            if self.is_first_run:
+                self.is_first_run = False
+                logger.info(f"Initial run complete. Cached {len(current_headlines['link'])} headlines. Now monitoring for new articles...")
 
             return new_news_objects
         except Exception as e:
@@ -58,7 +70,6 @@ class NewsMonitor:
             try:
                 logger.info(f"New article: {item.article.title}")
 
-                # Uncomment these when ready to use
                 summary = self.summarizer.generate_summary(item.article)
                 item.set_summary(summary)
                 await self.notifier.send_telegram_message(item)
