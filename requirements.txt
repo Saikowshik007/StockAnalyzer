@@ -1,0 +1,13 @@
+transformers~=4.51.2
+ycnbc~=1.0.8
+nltk~=3.9.1
+cachetools~=5.5.2
+newspaper4k
+lxml_html_clean
+peft
+protobuf
+sentencepiece
+python-telegram-bot~=22.0
+torch~=2.8.0.dev20250412+cu128
+telegram~=0.0.1
+numpy~=1.26.4
