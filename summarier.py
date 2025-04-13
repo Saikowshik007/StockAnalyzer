@@ -141,10 +141,10 @@ class Summarizer:
             for attempt in range(max_retries):
                 try:
                     response = self.client.responses.create(
-                        model="gpt-4o-mini",
+                        model="gpt-4o",
                         instructions=prompts.get_summarization_prompt(),
                         input=summary_text,
-                        temperature=0.3  # Lower temperature for more focused responses
+                        temperature=0.2  # Lower temperature for more focused responses
                     )
                     return response.output_text
                 except Exception as e:
