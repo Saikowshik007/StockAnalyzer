@@ -48,7 +48,7 @@ class Summarizer:
             self.logger.info("Downloading NLTK punkt tokenizer")
             nltk.download('punkt', quiet=True)
 
-    def generate_summary(self, article, max_length: int = 15) -> str:
+    def generate_summary(self, article, max_length: int = 20) -> str:
         """Generate a summary for the given article."""
         # Validate input
         if not hasattr(article, 'text_cleaned') or not article.text_cleaned:
@@ -74,7 +74,7 @@ class Summarizer:
             self.logger.error(f"Error in ChatGPT analysis: {e}")
             return f"Generated summary but analysis failed: {e}"
 
-    def _summarize_with_finbert(self, text: str, max_length: int = 15) -> str:
+    def _summarize_with_finbert(self, text: str, max_length: int = 20) -> str:
         """Summarize text using FinBERT for financial sentiment scoring with proper chunking."""
         # Tokenize the text into sentences
         sentences = sent_tokenize(text)

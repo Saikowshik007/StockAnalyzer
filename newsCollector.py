@@ -19,7 +19,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class NewsMonitor:
-    def __init__(self, cache_size: int = 10000, cache_ttl: int = 86400):
+    def __init__(self, cache_size: int = 100, cache_ttl: int = 86400):
         self.headlines_cache = TTLCache(maxsize=cache_size, ttl=cache_ttl)
         self.summarizer = Summarizer()
         self.notifier = Notifier()
