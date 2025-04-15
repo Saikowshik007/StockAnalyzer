@@ -38,9 +38,9 @@ class NewsMonitor:
 
             for headline, link in zip(current_headlines['headline'], current_headlines['link']):
                 # On first run, just populate the cache without processing
-                # if self.is_first_run:
-                #     self.headlines_cache[link] = True
-                #     continue
+                if self.is_first_run:
+                    self.headlines_cache[link] = True
+                    continue
 
                 skip_domains = ['investors.com', 'wsj.com', 'bloomberg.com', 'investing.com']
                 if any(domain in link for domain in skip_domains):
