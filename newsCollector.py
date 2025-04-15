@@ -1,10 +1,12 @@
 import asyncio
 import sys
 import logging
-from typing import List, Optional
+from typing import List
 
-import ycnbc
+import requests
 from cachetools import TTLCache
+
+from BiztocScraper import BiztocScraper
 from news import News
 from newspaper import Article
 from summarier import Summarizer
@@ -30,13 +32,19 @@ class NewsMonitor:
     def get_new_headlines(self) -> List[News]:
         """Fetch and process new headlines that aren't in the cache."""
         try:
-            news = ycnbc.News()
-            current_headlines = news.latest()
+            b = BiztocScraper(sources=['benzinga', 'cnbc', 'yahoo_finance','google_business','cnn','fox'])
+            current_headlines = b.latest()
             new_news_objects = []
 
             for headline, link in zip(current_headlines['headline'], current_headlines['link']):
                 # On first run, just populate the cache without processing
-                if self.is_first_run:
+                # if self.is_first_run:
+                #     self.headlines_cache[link] = True
+                #     continue
+
+                skip_domains = ['investors.com', 'wsj.com', 'bloomberg.com', 'investing.com']
+                if any(domain in link for domain in skip_domains):
+                    logger.info(f"Skipping known protected/paywalled site: {link}")
                     self.headlines_cache[link] = True
                     continue
 
@@ -50,6 +58,14 @@ class NewsMonitor:
                         news_obj = News(article)
                         new_news_objects.append(news_obj)
                         self.headlines_cache[link] = True
+                    except requests.exceptions.HTTPError as e:
+                        # Handle 401 and 403 errors (paid content)
+                        if e.response.status_code in (401, 403):
+                            logger.info(f"Skipping paid/restricted content at {link}: {e}")
+                            # Still add to cache so we don't try again
+                            self.headlines_cache[link] = True
+                        else:
+                            logger.error(f"HTTP error processing article {link}: {e}")
                     except Exception as e:
                         logger.error(f"Error processing article {link}: {e}")
                         continue
@@ -73,6 +89,7 @@ class NewsMonitor:
                 summary = self.summarizer.generate_summary(item.article)
                 item.set_summary(summary)
                 await self.notifier.send_telegram_message(item)
+                break
 
                 logger.info(f"Summary generated successfully: {item.article.title}")
                 logger.info("="*80)
