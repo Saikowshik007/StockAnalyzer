@@ -2,6 +2,7 @@ import asyncio
 import sys
 import logging
 from typing import List
+import datetime
 
 import requests
 from cachetools import TTLCache
@@ -96,20 +97,43 @@ class NewsMonitor:
             except Exception as e:
                 logger.error(f"Error processing item: {e}")
 
+    def is_business_hours(self) -> bool:
+        """Check if current time is within business hours (weekdays 8 AM - 3 PM)."""
+        now = datetime.datetime.now()
+
+        # Check if it's a weekday (Monday=0, Sunday=6)
+        is_weekday = now.weekday() < 5
+
+        # Check if time is between 8 AM and 3 PM
+        current_hour = now.hour
+        is_work_hours = 8 <= current_hour < 15
+
+        return is_weekday and is_work_hours
+
     async def monitor(self, interval_seconds: int = 30):
         """Main monitoring loop to check for and process new headlines."""
-        logger.info(f"Starting news monitoring. Checking every {interval_seconds} seconds...")
+        logger.info(f"Starting news monitoring. Checking every {interval_seconds} seconds during weekdays (Monday-Friday) from 8 AM to 3 PM...")
 
         while True:
             try:
-                # Get new headlines
-                new_headlines = self.get_new_headlines()
+                # Check if we should be running
+                if self.is_business_hours():
+                    # Get new headlines
+                    new_headlines = self.get_new_headlines()
 
-                if new_headlines:
-                    logger.info(f"Found {len(new_headlines)} new headlines!")
-                    await self.process_headlines(new_headlines)
+                    if new_headlines:
+                        logger.info(f"Found {len(new_headlines)} new headlines!")
+                        await self.process_headlines(new_headlines)
+                    else:
+                        logger.info("No new headlines found.")
                 else:
-                    logger.info("No new headlines found.")
+                    # Outside business hours - log if just transitioned out of business hours
+                    current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    logger.info(f"Outside business hours at {current_time}. Waiting...")
+
+                    # If we're outside business hours, wait longer before checking again
+                    await asyncio.sleep(300)  # Sleep for 5 minutes when outside business hours
+                    continue  # Skip the regular interval and check again
 
             except Exception as e:
                 logger.error(f"Unexpected error in monitoring loop: {e}")
