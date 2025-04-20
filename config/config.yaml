@@ -34,9 +34,10 @@ stock_collector:
   window_size: 30
   interval_seconds: 60
   default_watchlist:
-    - "AAPL"
-    - "GOOGL"
-    - "MSFT"
+    - "APP"
+    - "NVDA"
+    - "PLTR"
+    - "TSLA"
 
 pattern_monitor:
   interval_seconds: 300

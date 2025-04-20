@@ -149,7 +149,7 @@ class NewsMonitor:
                     current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     logger.info(f"Outside business hours at {current_time}. Waiting...")
                     # Check more frequently to allow for graceful shutdown
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(300)
         except asyncio.CancelledError:
             logger.info("News monitor task cancelled")
             # Re-raise to properly handle cancellation
