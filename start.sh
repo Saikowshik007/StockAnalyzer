@@ -4,7 +4,7 @@
 mkdir -p /home/sai/Desktop/StockAnalyzer/logs
 
 # Start the news collector in the background
-nohup python3 newsCollector.py > /home/sai/Desktop/StockAnalyzer/logs/collector_logs.log 2>&1 &
+nohup python3 main.py > /home/sai/Desktop/StockAnalyzer/logs/collector_logs.log 2>&1 &
 
 # Store the process ID for potential later use
 echo $! > /home/sai/Desktop/StockAnalyzer/logs/collector_pid.txt
