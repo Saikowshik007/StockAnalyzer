@@ -158,19 +158,19 @@ class FinancialMonitorApp:
             self.stock_collector.stop()
             self.db_manager.backup_database()
 
-    def main():
-        """Entry point for the application."""
-        if sys.platform == 'win32':
-            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+def main():
+    """Entry point for the application."""
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-        setup_logging()
+    setup_logging()
 
-        try:
-            app = FinancialMonitorApp()
-            asyncio.run(app.run())
-        except Exception as e:
-            logger.error(f"Failed to start application: {e}")
-            raise
+    try:
+        app = FinancialMonitorApp()
+        asyncio.run(app.run())
+    except Exception as e:
+        logger.error(f"Failed to start application: {e}")
+        raise
 
 if __name__ == "__main__":
     main()
