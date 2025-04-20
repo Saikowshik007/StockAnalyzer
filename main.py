@@ -144,13 +144,13 @@ class FinancialMonitorApp:
             pattern_thread.daemon = True
             pattern_thread.start()
 
-            # Run news monitor and bot in the main async loop
+            # Run news monitor and bot concurrently
             news_task = asyncio.create_task(self.news_monitor.monitor())
             bot_task = asyncio.create_task(self.bot.run_async())
 
             await asyncio.gather(news_task, bot_task)
 
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, SystemExit):
             logger.info("Application stopped by user")
         except Exception as e:
             logger.error(f"Application error: {e}")
@@ -158,20 +158,19 @@ class FinancialMonitorApp:
             self.stock_collector.stop()
             self.db_manager.backup_database()
 
-def main():
-    """Entry point for the application."""
-    if sys.platform == 'win32':
-        # For Windows, use a different event loop policy
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    def main():
+        """Entry point for the application."""
+        if sys.platform == 'win32':
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-    setup_logging()
+        setup_logging()
 
-    try:
-        app = FinancialMonitorApp()
-        asyncio.run(app.run())
-    except Exception as e:
-        logger.error(f"Failed to start application: {e}")
-        raise
+        try:
+            app = FinancialMonitorApp()
+            asyncio.run(app.run())
+        except Exception as e:
+            logger.error(f"Failed to start application: {e}")
+            raise
 
 if __name__ == "__main__":
     main()
