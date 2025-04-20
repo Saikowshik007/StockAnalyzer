@@ -135,7 +135,7 @@ class NewsMonitor:
         logger.info(f"Starting news monitoring. Checking every {interval_seconds} seconds during weekdays (Monday-Friday) from 8 AM to 3 PM...")
 
         try:
-            while True:
+            while not getattr(self, 'should_stop', False):
                 if self.is_business_hours():
                     new_headlines = self.get_new_headlines()
 
@@ -148,17 +148,15 @@ class NewsMonitor:
                 else:
                     current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     logger.info(f"Outside business hours at {current_time}. Waiting...")
-                    # Use shorter sleep intervals to allow for graceful shutdown
-                    for _ in range(300 // 10):  # 300 seconds total
-                        await asyncio.sleep(10)  # Check every 10 seconds
-                        # Exit if shutdown is requested
-                        if getattr(self, 'should_stop', False):
-                            return
+                    # Check more frequently to allow for graceful shutdown
+                    await asyncio.sleep(10)
         except asyncio.CancelledError:
             logger.info("News monitor task cancelled")
+            # Re-raise to properly handle cancellation
             raise
         except Exception as e:
             logger.error(f"Unexpected error in monitoring loop: {e}")
+            raise
 
     def stop(self):
         """Signal the monitor to stop."""

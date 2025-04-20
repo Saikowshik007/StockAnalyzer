@@ -67,36 +67,12 @@ class FinancialMonitorApp:
         self.shutdown_event = threading.Event()
         self.tasks = []
 
-    async def shutdown(self, loop):
-        """Gracefully shutdown tasks and close the event loop."""
-        logging.info("Shutting down application...")
-
-        # Set shutdown event to stop threads
-        self.shutdown_event.set()
-
-        # Cancel all tasks
-        tasks = [t for t in asyncio.all_tasks(loop) if t is not asyncio.current_task(loop)]
-        for task in tasks:
-            task.cancel()
-
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Stop the loop
-        loop.stop()
-
     def _initialize_watchlist(self):
         """Initialize the watchlist with default tickers from config."""
         default_watchlist = self.config.get('stock_collector.default_watchlist', [])
         for ticker in default_watchlist:
             self.db_manager.add_to_watchlist(ticker)
             self.stock_collector.add_stock(ticker)
-
-    def run_bot(self):
-        """Run the Telegram bot in a separate thread."""
-        try:
-            self.bot.run()
-        except Exception as e:
-            logger.error(f"Error running bot: {e}")
 
     def run_stock_collector(self):
         """Run the stock collector."""
@@ -107,7 +83,7 @@ class FinancialMonitorApp:
 
     def run_stock_data_saver(self):
         """Periodically save stock data to database."""
-        while True:
+        while not self.shutdown_event.is_set():
             try:
                 watchlist = self.db_manager.get_active_watchlist()
                 for ticker in watchlist:
@@ -150,87 +126,75 @@ class FinancialMonitorApp:
             self.db_manager.backup_database()
 
             # Start stock collector in a separate thread
-            stock_thread = threading.Thread(target=self.run_stock_collector)
-            stock_thread.daemon = True
+            stock_thread = threading.Thread(target=self.run_stock_collector, daemon=True)
             stock_thread.start()
 
             # Start stock data saver in a separate thread
-            saver_thread = threading.Thread(target=self.run_stock_data_saver)
-            saver_thread.daemon = True
+            saver_thread = threading.Thread(target=self.run_stock_data_saver, daemon=True)
             saver_thread.start()
 
             # Start pattern monitor in a separate thread
-            pattern_thread = threading.Thread(target=self.run_pattern_monitor)
-            pattern_thread.daemon = True
+            pattern_thread = threading.Thread(target=self.run_pattern_monitor, daemon=True)
             pattern_thread.start()
 
             # Create tasks for async components
             news_task = asyncio.create_task(self.news_monitor.monitor())
             bot_task = asyncio.create_task(self.bot.run_async())
+            self.tasks = [news_task, bot_task]
 
-            try:
-                await asyncio.gather(news_task, bot_task)
-            except asyncio.CancelledError:
-                logger.info("Tasks cancelled during shutdown")
+            # Wait for tasks to complete
+            await asyncio.gather(*self.tasks)
 
+        except asyncio.CancelledError:
+            logger.info("Tasks cancelled during shutdown")
         except Exception as e:
             logger.error(f"Application error: {e}")
+            # Re-raise the exception to ensure it's properly handled
+            raise
         finally:
-            # Signal components to stop
-            self.news_monitor.stop()
-            self.stock_collector.stop()
-            await asyncio.sleep(1)  # Give components time to shutdown
-            self.db_manager.backup_database()
+            await self.cleanup()
 
-def handle_exception(loop, context):
-    """Handle exceptions in the event loop."""
-    msg = context.get("exception", context["message"])
-    logger.error(f"Unhandled exception: {msg}")
+    async def cleanup(self):
+        """Cleanup resources properly."""
+        logger.info("Starting cleanup...")
+
+        # Signal components to stop
+        self.shutdown_event.set()
+        self.news_monitor.stop()
+        self.stock_collector.stop()
+
+        # Cancel all running tasks
+        for task in self.tasks:
+            if not task.done():
+                task.cancel()
+
+        # Wait for tasks to be cancelled
+        if self.tasks:
+            await asyncio.gather(*self.tasks, return_exceptions=True)
+
+        # Give threads time to shutdown
+        await asyncio.sleep(1)
+
+        # Final backup
+        self.db_manager.backup_database()
+        logger.info("Cleanup completed")
 
 def main():
     """Entry point for the application."""
-    if sys.platform == 'win32':
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
     setup_logging()
 
+    app = FinancialMonitorApp()
+
     try:
-        app = FinancialMonitorApp()
-
-        # Create and configure event loop
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        # Add signal handlers
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(
-                sig,
-                lambda: asyncio.create_task(app.shutdown(loop))
-            )
-
-        # Set exception handler
-        loop.set_exception_handler(handle_exception)
-
-        try:
-            loop.run_until_complete(app.run())
-        except KeyboardInterrupt:
-            logger.info("Received keyboard interrupt")
-        finally:
-            pending = asyncio.all_tasks(loop)
-            for task in pending:
-                if not task.done():
-                    task.cancel()
-            group = asyncio.gather(*pending, return_exceptions=True)
-            loop.run_until_complete(group)
-            loop.run_until_complete(loop.shutdown_asyncgens())
-            loop.close()
-            logger.info("Event loop closed")
-
+        asyncio.run(app.run())
+    except KeyboardInterrupt:
+        logger.info("Received keyboard interrupt")
     except Exception as e:
         logger.error(f"Failed to start application: {e}")
         import traceback
         traceback.print_exc()
-        raise
+    finally:
+        logger.info("Application shutdown complete")
 
 if __name__ == "__main__":
     main()
