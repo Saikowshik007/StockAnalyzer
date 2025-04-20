@@ -1,5 +1,6 @@
 # main.py
 import asyncio
+import signal
 import sys
 import logging
 import threading
@@ -63,6 +64,25 @@ class FinancialMonitorApp:
 
         # Initialize default watchlist
         self._initialize_watchlist()
+        self.shutdown_event = threading.Event()
+        self.tasks = []
+
+    async def shutdown(self, loop):
+        """Gracefully shutdown tasks and close the event loop."""
+        logging.info("Shutting down application...")
+
+        # Set shutdown event to stop threads
+        self.shutdown_event.set()
+
+        # Cancel all tasks
+        tasks = [t for t in asyncio.all_tasks(loop) if t is not asyncio.current_task(loop)]
+        for task in tasks:
+            task.cancel()
+
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Stop the loop
+        loop.stop()
 
     def _initialize_watchlist(self):
         """Initialize the watchlist with default tickers from config."""
@@ -144,19 +164,30 @@ class FinancialMonitorApp:
             pattern_thread.daemon = True
             pattern_thread.start()
 
-            # Run news monitor and bot concurrently
-            news_task = asyncio.create_task(self.news_monitor.monitor())
-            bot_task = asyncio.create_task(self.bot.run_async())
+            # Create tasks for async components
+            self.tasks = [
+                asyncio.create_task(self.news_monitor.monitor()),
+                asyncio.create_task(self.bot.run_async())
+            ]
 
-            await asyncio.gather(news_task, bot_task)
+            # Wait for all tasks
+            await asyncio.gather(*self.tasks)
 
-        except (KeyboardInterrupt, SystemExit):
-            logger.info("Application stopped by user")
+        except asyncio.CancelledError:
+            logger.info("Tasks cancelled, shutting down...")
         except Exception as e:
             logger.error(f"Application error: {e}")
         finally:
+            # Cleanup
+            if not self.shutdown_event.is_set():
+                self.shutdown_event.set()
             self.stock_collector.stop()
             self.db_manager.backup_database()
+
+def handle_exception(loop, context):
+    """Handle exceptions in the event loop."""
+    msg = context.get("exception", context["message"])
+    logger.error(f"Unhandled exception: {msg}")
 
 def main():
     """Entry point for the application."""
@@ -167,9 +198,40 @@ def main():
 
     try:
         app = FinancialMonitorApp()
-        asyncio.run(app.run())
+
+        # Create and configure event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        # Add signal handlers
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(
+                sig,
+                lambda: asyncio.create_task(app.shutdown(loop))
+            )
+
+        # Set exception handler
+        loop.set_exception_handler(handle_exception)
+
+        try:
+            loop.run_until_complete(app.run())
+        except KeyboardInterrupt:
+            logger.info("Received keyboard interrupt")
+        finally:
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                if not task.done():
+                    task.cancel()
+            group = asyncio.gather(*pending, return_exceptions=True)
+            loop.run_until_complete(group)
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.close()
+            logger.info("Event loop closed")
+
     except Exception as e:
         logger.error(f"Failed to start application: {e}")
+        import traceback
+        traceback.print_exc()
         raise
 
 if __name__ == "__main__":

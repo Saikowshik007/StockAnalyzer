@@ -420,5 +420,5 @@ class TelegramBot:
         self.application.add_handler(CommandHandler("stats", self.stats))
         self.application.add_handler(CallbackQueryHandler(self.button_callback))
 
-        # Start the bot polling
+        # Start the bot polling - this handles initialization and shutdown internally
         await self.application.run_polling()
