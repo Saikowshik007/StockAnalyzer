@@ -1,3 +1,4 @@
+# main.py
 import asyncio
 import sys
 import logging
@@ -6,12 +7,12 @@ from datetime import datetime
 import os
 import time
 
-from services.pattern_monitor import PatternMonitor
 from utils.config_loader import ConfigLoader
 from database.db_manager import DatabaseManager
 from collectors.stock_collector import MultiStockCollector
 from collectors.news_collector import NewsMonitor
 from services.bot_service import TelegramBot
+from services.pattern_monitor import TalibPatternMonitor
 
 # Configure logging
 def setup_logging():
@@ -44,16 +45,16 @@ class FinancialMonitorApp:
             interval_seconds=self.config.get('stock_collector.interval_seconds', 60)
         )
 
-        self.news_monitor = NewsMonitor(self.config, self.db_manager)
-
         telegram_config = self.config.get('telegram', {})
         self.bot = TelegramBot(
             telegram_config,
             self.db_manager,
-            self.stock_collector,
-            self.news_monitor.notifier
+            self.stock_collector
         )
-        self.pattern_monitor = PatternMonitor(
+
+        # Now initialize components that use the bot for notifications
+        self.news_monitor = NewsMonitor(self.config, self.db_manager, self.bot)
+        self.pattern_monitor = TalibPatternMonitor(
             self.config,
             self.db_manager,
             self.stock_collector,
@@ -84,16 +85,6 @@ class FinancialMonitorApp:
         except Exception as e:
             logger.error(f"Error running stock collector: {e}")
 
-    def run_pattern_monitor(self):
-        """Run the pattern monitoring loop."""
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        try:
-            loop.run_until_complete(self.pattern_monitor.monitor_patterns())
-        except Exception as e:
-            logger.error(f"Error in pattern monitor: {e}")
-
     def run_stock_data_saver(self):
         """Periodically save stock data to database."""
         while True:
@@ -116,6 +107,16 @@ class FinancialMonitorApp:
             except Exception as e:
                 logger.error(f"Error saving stock data: {e}")
                 time.sleep(60)
+
+    def run_pattern_monitor(self):
+        """Run the pattern monitoring loop."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        try:
+            loop.run_until_complete(self.pattern_monitor.monitor_patterns())
+        except Exception as e:
+            logger.error(f"Error in pattern monitor: {e}")
 
     async def run(self):
         """Main application runner."""
@@ -143,6 +144,7 @@ class FinancialMonitorApp:
             saver_thread.daemon = True
             saver_thread.start()
 
+            # Start pattern monitor in a separate thread
             pattern_thread = threading.Thread(target=self.run_pattern_monitor)
             pattern_thread.daemon = True
             pattern_thread.start()

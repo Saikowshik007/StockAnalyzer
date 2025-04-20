@@ -1,3 +1,4 @@
+# services/pattern_monitor_talib.py (completed)
 import asyncio
 import logging
 from datetime import datetime, timedelta
@@ -14,7 +15,7 @@ class TalibPatternMonitor:
         self.config = config
         self.db_manager = db_manager
         self.stock_collector = stock_collector
-        self.bot_notifier = bot_notifier
+        self.bot_notifier = bot_notifier  # This will be the TelegramBot instance now
         self.pattern_recognizer = TalibPatternRecognition()
         self.last_notification = {}
         self.monitoring_interval = config.get('pattern_monitor.interval_seconds', 300)
@@ -55,13 +56,10 @@ class TalibPatternMonitor:
                     )
 
                     if signal['action'] and self.should_notify(ticker):
-                        await self.send_pattern_notification(
-                            ticker,
-                            pattern_name,
-                            occurrence,
-                            signal,
-                            current_price
+                        message = self._format_pattern_notification(
+                            ticker, pattern_name, occurrence, signal, current_price
                         )
+                        await self.bot_notifier.send_pattern_notification(message)
                         self.last_notification[ticker] = datetime.now()
 
     def should_notify(self, ticker: str) -> bool:
@@ -71,12 +69,6 @@ class TalibPatternMonitor:
 
         time_since_last = datetime.now() - self.last_notification[ticker]
         return time_since_last.total_seconds() > self.notification_cooldown
-
-    async def send_pattern_notification(self, ticker: str, pattern_name: str,
-                                        occurrence: Dict, signal: Dict, current_price: float):
-        """Send Telegram notification about the pattern and trading signal."""
-        message = self._format_pattern_notification(ticker, pattern_name, occurrence, signal, current_price)
-        await self.bot_notifier.send_pattern_message(message)
 
     def _format_pattern_notification(self, ticker: str, pattern_name: str,
                                      occurrence: Dict, signal: Dict, current_price: float) -> str:
