@@ -404,21 +404,44 @@ class TelegramBot:
                 await query.edit_message_text(f"Failed to remove {ticker}")
 
     async def run_async(self):
-        """Run the bot asynchronously."""
-        self.application = Application.builder().token(self.token).build()
+        """Run the bot in an existing event loop."""
+        try:
+            self.application = Application.builder().token(self.token).build()
 
-        # Add handlers
-        self.application.add_handler(CommandHandler("start", self.start))
-        self.application.add_handler(CommandHandler("help", self.start))
-        self.application.add_handler(CommandHandler("watchlist", self.watchlist))
-        self.application.add_handler(CommandHandler("add", self.add_stock))
-        self.application.add_handler(CommandHandler("remove", self.remove_stock))
-        self.application.add_handler(CommandHandler("price", self.price))
-        self.application.add_handler(CommandHandler("history", self.history))
-        self.application.add_handler(CommandHandler("pattern", self.check_pattern))
-        self.application.add_handler(CommandHandler("latest", self.latest_news))
-        self.application.add_handler(CommandHandler("stats", self.stats))
-        self.application.add_handler(CallbackQueryHandler(self.button_callback))
+            # Add handlers
+            self.application.add_handler(CommandHandler("start", self.start))
+            self.application.add_handler(CommandHandler("help", self.start))
+            self.application.add_handler(CommandHandler("watchlist", self.watchlist))
+            self.application.add_handler(CommandHandler("add", self.add_stock))
+            self.application.add_handler(CommandHandler("remove", self.remove_stock))
+            self.application.add_handler(CommandHandler("price", self.price))
+            self.application.add_handler(CommandHandler("history", self.history))
+            self.application.add_handler(CommandHandler("pattern", self.check_pattern))
+            self.application.add_handler(CommandHandler("latest", self.latest_news))
+            self.application.add_handler(CommandHandler("stats", self.stats))
+            self.application.add_handler(CallbackQueryHandler(self.button_callback))
 
-        # Start the bot polling - this handles initialization and shutdown internally
-        await self.application.run_polling()
+            # Initialize the application without running the loop
+            await self.application.initialize()
+            await self.application.start()
+
+            # Start the updater
+            await self.application.updater.start_polling()
+
+            # Keep running indefinitely
+            try:
+                while True:
+                    await asyncio.sleep(3600)  # Sleep for an hour
+            except asyncio.CancelledError:
+                logger.info("Bot task cancelled, shutting down...")
+                raise
+            finally:
+                # Clean shutdown
+                await self.application.updater.stop()
+                await self.application.stop()
+                await self.application.shutdown()
+
+        except Exception as e:
+            logger.error(f"Error in bot async run: {e}")
+            # Re-raise to let the main loop handle it
+            raise
