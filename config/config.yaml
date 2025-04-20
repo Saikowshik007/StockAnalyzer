@@ -1,58 +1,58 @@
-# config/config.yaml
+# config.template.yaml
 telegram:
   api_key: ${TELEGRAM_API_KEY}
   chat_id: "-4606618937"
 
-  openai:
-    api_key: ${OPENAI_API_KEY}
-    model: "gpt-4o-mini"
-    max_tokens: 1024
-    temperature: 0.1
+openai:
+  api_key: ${OPENAI_API_KEY}
 
-  database:
-    type: "sqlite"
-    name: "financial_monitor.db"
-    backup_enabled: true
-    backup_path: "./backups"
+database:
+  type: "sqlite"
+  name: "/app/database/financial_monitor.db"
+  backup_enabled: true
+  backup_path: "/app/backups"
 
-  news_collector:
-    interval_seconds: 30
-    business_hours:
-      start: 8
-      end: 15
-    sources:
-      - "benzinga"
-      - "cnbc"
-      - "yahoo_finance"
-      - "google_business"
-      - "cnn"
-      - "fox"
-    skip_domains:
-      - "investors.com"
-      - "wsj.com"
-      - "bloomberg.com"
-      - "investing.com"
+news_collector:
+  interval_seconds: 30
+  business_hours:
+    start: 8
+    end: 15
+  sources:
+    - "benzinga"
+    - "cnbc"
+    - "yahoo_finance"
+    - "google_business"
+    - "cnn"
+    - "fox"
+  skip_domains:
+    - "investors.com"
+    - "wsj.com"
+    - "bloomberg.com"
+    - "investing.com"
 
-  stock_collector:
-    window_size: 30
-    interval_seconds: 60
-    default_watchlist:
-      - "AAPL"
-      - "GOOGL"
-      - "MSFT"
+stock_collector:
+  window_size: 30
+  interval_seconds: 60
+  default_watchlist:
+    - "AAPL"
+    - "GOOGL"
+    - "MSFT"
 
-  summarizer:
-    max_sentences: 150
-    batch_size: 8
-    max_retries: 3
+pattern_monitor:
+  interval_seconds: 300
+  notification_cooldown: 3600
 
-  logging:
-    level: "INFO"
-    format: "%(asctime)s - %(levelname)s - %(message)s"
-    file: "logs/application.log"
+summarizer:
+  max_tokens: 1024
+  max_sentences: 150
+  batch_size: 8
+  max_retries: 3
+  openai_model: "gpt-4o-mini"
+  temperature: 0.1
+  openai_max_tokens: 1024
+  model_name: "ProsusAI/finbert"
 
-  pattern_monitor:
-    interval_seconds: 300  # Check patterns every 5 minutes
-    notification_cooldown: 3600  # 1 hour cooldown between notifications for the same ticker
-    price_threshold: 0.02  # 2% price similarity threshold
-    time_threshold: 5  # Minimum distance between peaks/troughs
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(levelname)s - %(message)s"
+  file: "/app/logs/application.log"

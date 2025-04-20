@@ -1,6 +1,6 @@
+# services/summarizer.py
 import os
 from datetime import time
-
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
 import nltk
@@ -8,19 +8,33 @@ from nltk.tokenize import sent_tokenize
 import numpy as np
 from openai import OpenAI
 import logging
-from typing import  Optional
+from typing import Optional, Dict, Any
 
 class Summarizer:
-    def __init__(self, api_key: Optional[str] = None, max_tokens: int = 1024, model_name: str = "ProsusAI/finbert"):
+    def __init__(self, config: Dict[str, Any] = None):
         # Set up logging
         self.logger = logging.getLogger(__name__)
+
+        # Handle config - use defaults if not provided
+        if config is None:
+            config = {}
+
+        self.config = config
+        self.max_tokens = config.get('max_tokens', 1024)
+        self.model_name = config.get('model_name', "ProsusAI/finbert")
+        self.max_sentences = config.get('max_sentences', 150)
+        self.batch_size = config.get('batch_size', 8)
+        self.max_retries = config.get('max_retries', 3)
+        self.openai_model = config.get('openai_model', "gpt-4o-mini")
+        self.openai_temperature = config.get('temperature', 0.1)
+        self.openai_max_tokens = config.get('openai_max_tokens', 1024)
 
         # Initialize FinBERT
         try:
             # Load with optimized parameters for accuracy while managing memory
-            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
             self.model = AutoModelForSequenceClassification.from_pretrained(
-                model_name,
+                self.model_name,
                 torch_dtype=torch.float16,
                 low_cpu_mem_usage=True
             )
@@ -31,17 +45,16 @@ class Summarizer:
             self.logger.error(f"Error loading FinBERT model: {e}")
             raise
 
-        # Initialize OpenAI client
+        # Initialize OpenAI client - get API key from environment or config
         try:
-            self.client = OpenAI(
-                api_key=api_key or os.environ.get("OPENAI_API_KEY")
-            )
+            api_key = os.environ.get("OPENAI_API_KEY")
+            if config and isinstance(config, dict) and 'api_key' in config:
+                api_key = config['api_key']
+
+            self.client = OpenAI(api_key=api_key)
         except Exception as e:
             self.logger.error(f"Error initializing OpenAI client: {e}")
             raise
-
-        # Set token length for transformer - balance between performance and memory
-        self.max_tokens = max_tokens
 
         # Ensure NLTK resources are available
         self._ensure_nltk_resources()
@@ -76,7 +89,6 @@ class Summarizer:
         # Return summarized text or analyze with ChatGPT if needed
         try:
             return self._analyze_with_chatgpt(summarized_text)
-            return summarized_text
         except Exception as e:
             self.logger.error(f"Error in ChatGPT analysis: {e}")
             return f"Generated summary but analysis failed: {e}"
@@ -90,17 +102,15 @@ class Summarizer:
             return ""
 
         # Limit number of sentences for memory efficiency while maintaining accuracy
-        max_sentences = 150  # Balance between completeness and memory usage
-        if len(sentences) > max_sentences:
-            self.logger.info(f"Limiting analysis to first {max_sentences} sentences")
-            sentences = sentences[:max_sentences]
+        if len(sentences) > self.max_sentences:
+            self.logger.info(f"Limiting analysis to first {self.max_sentences} sentences")
+            sentences = sentences[:self.max_sentences]
 
         # Process sentences in batches - smaller for memory constraints
-        batch_size = 8  # Balance between speed and memory usage
         all_importance_scores = []
 
-        for i in range(0, len(sentences), batch_size):
-            batch_sentences = sentences[i:i+batch_size]
+        for i in range(0, len(sentences), self.batch_size):
+            batch_sentences = sentences[i:i+self.batch_size]
 
             # Tokenize sentences
             inputs = self.tokenizer(
@@ -142,27 +152,26 @@ class Summarizer:
 
     def _analyze_with_chatgpt(self, summary_text: str) -> str:
         """Use ChatGPT to analyze a financial text summary."""
-        from Prompts import Prompts
+        from utils.prompts import Prompts
 
         try:
             prompts = Prompts()
 
             # Create response with retry logic
-            max_retries = 3
-            for attempt in range(max_retries):
+            for attempt in range(self.max_retries):
                 try:
                     response = self.client.chat.completions.create(
-                        model="gpt-4o-mini",  # Use mini model for efficiency
+                        model=self.openai_model,  # Use model from config
                         messages=[
                             {"role": "system", "content": prompts.get_summarization_prompt()},
                             {"role": "user", "content": summary_text}
                         ],
-                        temperature=0.1,  # Lower temperature for more deterministic results
-                        max_tokens=1024   # Sufficient for analysis without excessive usage
+                        temperature=self.openai_temperature,  # Use temperature from config
+                        max_tokens=self.openai_max_tokens   # Use max_tokens from config
                     )
                     return response.choices[0].message.content
                 except Exception as e:
-                    if attempt < max_retries - 1:
+                    if attempt < self.max_retries - 1:
                         self.logger.warning(f"OpenAI API attempt {attempt+1} failed: {e}, retrying...")
                         time.sleep(2 ** attempt)  # Exponential backoff
                     else:

@@ -1,3 +1,4 @@
+# collectors/news_collector.py
 import asyncio
 import logging
 from typing import List
@@ -5,10 +6,10 @@ import datetime
 import requests
 from cachetools import TTLCache
 
-from services.summarier import Summarizer
 from .biztoc_scraper import BiztocScraper
 from services.news import News
 from newspaper import Article
+from services.summarizer import Summarizer
 from services.analysis_service import AnalysisService
 
 logger = logging.getLogger(__name__)
@@ -17,9 +18,18 @@ class NewsMonitor:
     def __init__(self, config, db_manager, bot_notifier):
         self.config = config
         self.db_manager = db_manager
-        self.bot_notifier = bot_notifier  # This will be the TelegramBot instance now
+        self.bot_notifier = bot_notifier
         self.headlines_cache = TTLCache(maxsize=100, ttl=86400)
-        self.summarizer = Summarizer(config=config.get('summarizer'))
+
+        # Get summarizer config and OpenAI config separately
+        summarizer_config = config.get('summarizer', {})
+        openai_config = config.get('openai', {})
+
+        # Add OpenAI API key to summarizer config if available
+        if 'api_key' in openai_config:
+            summarizer_config['api_key'] = openai_config['api_key']
+
+        self.summarizer = Summarizer(config=summarizer_config)
         self.analysis_service = AnalysisService()
         self.is_first_run = True
         self.sources = config.get('news_collector.sources', [])
@@ -110,11 +120,18 @@ class NewsMonitor:
         now = datetime.datetime.now()
         is_weekday = now.weekday() < 5
         current_hour = now.hour
-        is_work_hours = 8 <= current_hour < 15
+
+        # Get business hours from config
+        start_hour = self.config.get('news_collector.business_hours.start', 8)
+        end_hour = self.config.get('news_collector.business_hours.end', 15)
+
+        is_work_hours = start_hour <= current_hour < end_hour
         return is_weekday and is_work_hours
 
-    async def monitor(self, interval_seconds: int = 30):
+    async def monitor(self):
         """Main monitoring loop to check for and process new headlines."""
+        interval_seconds = self.config.get('news_collector.interval_seconds', 30)
+
         logger.info(f"Starting news monitoring. Checking every {interval_seconds} seconds during weekdays (Monday-Friday) from 8 AM to 3 PM...")
 
         while True:
