@@ -129,11 +129,6 @@ class FinancialMonitorApp:
             # Start backup manager
             self.db_manager.backup_database()
 
-            # Start the bot in a separate thread
-            bot_thread = threading.Thread(target=self.run_bot)
-            bot_thread.daemon = True
-            bot_thread.start()
-
             # Start stock collector in a separate thread
             stock_thread = threading.Thread(target=self.run_stock_collector)
             stock_thread.daemon = True
@@ -149,8 +144,11 @@ class FinancialMonitorApp:
             pattern_thread.daemon = True
             pattern_thread.start()
 
-            # Run news monitor in the main async loop
-            await self.news_monitor.monitor()
+            # Run news monitor and bot in the main async loop
+            news_task = asyncio.create_task(self.news_monitor.monitor())
+            bot_task = asyncio.create_task(self.bot.run_async())
+
+            await asyncio.gather(news_task, bot_task)
 
         except KeyboardInterrupt:
             logger.info("Application stopped by user")

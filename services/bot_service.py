@@ -403,32 +403,22 @@ class TelegramBot:
             else:
                 await query.edit_message_text(f"Failed to remove {ticker}")
 
-    def run(self):
-        """Start the bot with proper asyncio setup."""
-        # Create a new event loop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    async def run_async(self):
+        """Run the bot asynchronously."""
+        self.application = Application.builder().token(self.token).build()
 
-        try:
-            self.application = Application.builder().token(self.token).build()
+        # Add handlers
+        self.application.add_handler(CommandHandler("start", self.start))
+        self.application.add_handler(CommandHandler("help", self.start))
+        self.application.add_handler(CommandHandler("watchlist", self.watchlist))
+        self.application.add_handler(CommandHandler("add", self.add_stock))
+        self.application.add_handler(CommandHandler("remove", self.remove_stock))
+        self.application.add_handler(CommandHandler("price", self.price))
+        self.application.add_handler(CommandHandler("history", self.history))
+        self.application.add_handler(CommandHandler("pattern", self.check_pattern))
+        self.application.add_handler(CommandHandler("latest", self.latest_news))
+        self.application.add_handler(CommandHandler("stats", self.stats))
+        self.application.add_handler(CallbackQueryHandler(self.button_callback))
 
-            # Add handlers
-            self.application.add_handler(CommandHandler("start", self.start))
-            self.application.add_handler(CommandHandler("help", self.start))
-            self.application.add_handler(CommandHandler("watchlist", self.watchlist))
-            self.application.add_handler(CommandHandler("add", self.add_stock))
-            self.application.add_handler(CommandHandler("remove", self.remove_stock))
-            self.application.add_handler(CommandHandler("price", self.price))
-            self.application.add_handler(CommandHandler("history", self.history))
-            self.application.add_handler(CommandHandler("pattern", self.check_pattern))
-            self.application.add_handler(CommandHandler("latest", self.latest_news))
-            self.application.add_handler(CommandHandler("stats", self.stats))
-            self.application.add_handler(CallbackQueryHandler(self.button_callback))
-
-            # Start the bot in this thread's event loop
-            loop.run_until_complete(self.application.run_polling())
-        finally:
-            try:
-                loop.close()
-            except:
-                pass
+        # Start the bot
+        await self.application.run_polling()
