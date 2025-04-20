@@ -165,23 +165,21 @@ class FinancialMonitorApp:
             pattern_thread.start()
 
             # Create tasks for async components
-            self.tasks = [
-                asyncio.create_task(self.news_monitor.monitor()),
-                asyncio.create_task(self.bot.run_async())
-            ]
+            news_task = asyncio.create_task(self.news_monitor.monitor())
+            bot_task = asyncio.create_task(self.bot.run_async())
 
-            # Wait for all tasks
-            await asyncio.gather(*self.tasks)
+            try:
+                await asyncio.gather(news_task, bot_task)
+            except asyncio.CancelledError:
+                logger.info("Tasks cancelled during shutdown")
 
-        except asyncio.CancelledError:
-            logger.info("Tasks cancelled, shutting down...")
         except Exception as e:
             logger.error(f"Application error: {e}")
         finally:
-            # Cleanup
-            if not self.shutdown_event.is_set():
-                self.shutdown_event.set()
+            # Signal components to stop
+            self.news_monitor.stop()
             self.stock_collector.stop()
+            await asyncio.sleep(1)  # Give components time to shutdown
             self.db_manager.backup_database()
 
 def handle_exception(loop, context):
