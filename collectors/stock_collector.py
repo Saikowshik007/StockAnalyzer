@@ -1,9 +1,11 @@
+import logging
+
 import yfinance as yf
 import pandas as pd
 import datetime
 import time
 import threading
-
+logger = logging.getLogger(__name__)
 
 class MultiStockCollector:
     def __init__(self, window_size=30, interval_seconds=60):
@@ -30,10 +32,10 @@ class MultiStockCollector:
                 self.data_caches[f"data_{ticker_symbol}"] = pd.DataFrame(
                     columns=['datetime', 'open', 'high', 'low', 'close', 'volume']
                 )
-                print(f"Added {ticker_symbol} to watchlist")
+                logger.info(f"Added {ticker_symbol} to watchlist")
                 return True
             else:
-                print(f"{ticker_symbol} already in watchlist")
+                logger.info(f"{ticker_symbol} already in watchlist")
                 return False
 
     def remove_stock(self, ticker_symbol):
@@ -42,10 +44,10 @@ class MultiStockCollector:
             if ticker_symbol in self.watchlist:
                 self.watchlist.remove(ticker_symbol)
                 del self.data_caches[f"data_{ticker_symbol}"]
-                print(f"Removed {ticker_symbol} from watchlist")
+                logger.info(f"Removed {ticker_symbol} from watchlist")
                 return True
             else:
-                print(f"{ticker_symbol} not in watchlist")
+                logger.info(f"{ticker_symbol} not in watchlist")
                 return False
 
     def get_watchlist(self):
@@ -69,7 +71,7 @@ class MultiStockCollector:
                     'volume': latest['Volume']
                 }
         except Exception as e:
-            print(f"Error fetching data for {ticker_symbol}: {e}")
+            logger.error(f"Error fetching data for {ticker_symbol}: {e}")
         return None
 
     def update_cache(self, ticker_symbol):
@@ -116,14 +118,14 @@ class MultiStockCollector:
             self.collector_thread = threading.Thread(target=self.collector_loop)
             self.collector_thread.daemon = True
             self.collector_thread.start()
-            print(f"Started collecting data every {self.interval} seconds")
+            logger.info(f"Started collecting data every {self.interval} seconds")
 
     def stop(self):
         """Stop the data collection process."""
         self.is_running = False
         if self.collector_thread:
             self.collector_thread.join()
-        print("Stopped collecting data")
+        logger.info("Stopped collecting data")
 
     def get_data(self, ticker_symbol):
         """Return a copy of the current cached data for a specific ticker."""
@@ -180,9 +182,9 @@ class MultiStockCollector:
         with self.lock:
             if cache_key in self.data_caches and not self.data_caches[cache_key].empty:
                 self.data_caches[cache_key].to_csv(filename, index=False)
-                print(f"Data saved to {filename}")
+                logger.info(f"Data saved to {filename}")
             else:
-                print(f"No data to save for {ticker_symbol}")
+                logger.info(f"No data to save for {ticker_symbol}")
 
     def get_latest_prices(self):
         """Get the latest price for each stock in watchlist."""
