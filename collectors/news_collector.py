@@ -7,7 +7,7 @@ import datetime
 import requests
 from cachetools import TTLCache
 
-from BiztocScraper import BiztocScraper
+from collectors.biztoc_scraper import BiztocScraper
 from news import News
 from newspaper import Article
 from summarier import Summarizer
