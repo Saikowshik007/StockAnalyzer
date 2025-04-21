@@ -437,7 +437,7 @@ class TelegramBot:
 
             message += "📊 *Combined Signal:*\n"
             message += f"Action: {combined_action}\n"
-            message += f"Confidence: {combined_confidence.upper()}\n\n"
+            message += f"Confidence: {self.escape_markdown(combined_confidence.upper())}\n\n"
 
             # Add key pattern details only for strong signals
             if combined_action in ['BUY', 'SELL'] and combined_confidence in ['high', 'very_high']:
@@ -463,15 +463,14 @@ class TelegramBot:
             if ticker in latest_prices and 'short_term' in latest_prices[ticker]:
                 current_price = latest_prices[ticker]['short_term']['price']
                 # Escape special characters for MarkdownV2
-                message += f"\n💰 Current Price: ${escape_markdown(f'{current_price:.2f}')}"
+                message += f"\n💰 Current Price: ${self.escape_markdown(f'{current_price:.2f}')}"
         except Exception as e:
             logger.error(f"Error getting current price: {e}")
 
-        print(message)
         await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
 
     # Add this helper function to escape Markdown characters
-    def escape_markdown(text):
+    def escape_markdown(self,text):
         """
         Helper function to escape MarkdownV2 special characters.
         Must escape: _ * [ ] ( ) ~ ` > # + - = | { } . !
@@ -531,7 +530,7 @@ class TelegramBot:
             message += f"• [{article.title}]({article.url})\n"
             message += f"  Sentiment: {article.sentiment_category} ({article.sentiment_rating}/10)\n\n"
 
-        await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
 
     async def stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /stats command."""
