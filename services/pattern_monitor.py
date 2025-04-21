@@ -104,7 +104,7 @@ class TalibPatternMonitor:
                 logger.info(f"Low market activity detected, adjusting interval to {new_interval}s")
                 self.monitoring_interval = new_interval
 
-    def analyze_multiple_timeframes(self, ticker: str) -> Dict:
+    async def analyze_multiple_timeframes(self, ticker: str) -> Dict:
         """Enhanced multi-timeframe analysis with smarter integration of indicators."""
         all_timeframe_data = self.stock_collector.get_multi_timeframe_data(ticker)
         signals = {}
@@ -139,7 +139,7 @@ class TalibPatternMonitor:
         # Combine signals from all timeframes
         if signals:
             return self.generate_combined_signal(signals)
-        return None
+        return {}
 
     def _adjust_signals_with_context(self, signals, indicators_by_timeframe):
         """Adjust signal confidence based on cross-timeframe context."""
