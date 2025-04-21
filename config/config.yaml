@@ -18,9 +18,6 @@ news_collector:
     - "benzinga"
     - "cnbc"
     - "yahoo_finance"
-    - "google_business"
-    - "cnn"
-    - "fox"
   skip_domains:
     - "investors.com"
     - "wsj.com"
