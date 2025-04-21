@@ -2,6 +2,8 @@
 import asyncio
 import logging
 import re
+
+import pandas as pd
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from telegram.constants import ParseMode
@@ -17,6 +19,21 @@ class TelegramBot:
         self.stock_collector = stock_collector
         self.application = None
         self.pattern_recognizer = TalibPatternRecognition()
+        # Timeframe configurations
+        self.timeframe_weights = {
+            'long_term': 0.5,
+            'medium_term': 0.3,
+            'short_term': 0.2
+        }
+
+        # Confidence thresholds
+        self.confidence_thresholds = {
+            'very_high': 0.9,
+            'high': 0.7,
+            'medium_high': 0.6,
+            'medium': 0.5,
+            'low': 0.3
+        }
 
     async def send_news_notification(self, news):
         """Send news summary notification to the Telegram chat."""
@@ -198,9 +215,9 @@ class TelegramBot:
             "/watchlist - Show current watchlist\n"
             "/add <ticker> - Add stock to watchlist\n"
             "/remove <ticker> - Remove stock from watchlist\n"
-            "/price <ticker> - Get current price\n"
+            "/price <ticker> - Get current price (multi-timeframe)\n"
             "/history <ticker> - Get price history\n"
-            "/pattern <ticker> - Analyze technical patterns\n"
+            "/pattern <ticker> - Analyze patterns (multi-timeframe)\n"
             "/latest - Get latest news summaries\n"
             "/stats - Get system statistics\n"
             "/help - Show this help message"
@@ -217,7 +234,15 @@ class TelegramBot:
 
         message = "📋 *Current Watchlist*\n\n"
         for ticker in watchlist:
-            latest_price = self.stock_collector.get_latest_prices().get(ticker, {}).get('price', 'N/A')
+            # Get multi-timeframe prices
+            multi_prices = self.stock_collector.get_latest_prices()
+            ticker_data = multi_prices.get(ticker, {})
+
+            if 'short_term' in ticker_data:
+                latest_price = ticker_data['short_term'].get('price', 'N/A')
+            else:
+                latest_price = 'N/A'
+
             message += f"• {ticker}: ${latest_price}\n"
 
         # Create inline keyboard for easy management
@@ -255,24 +280,52 @@ class TelegramBot:
             await update.message.reply_text(f"{ticker} not found in watchlist")
 
     async def price(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /price <ticker> command."""
+        """Handle /price <ticker> command with multi-timeframe data."""
         if not context.args:
             await update.message.reply_text("Please provide a ticker symbol: /price AAPL")
             return
 
         ticker = context.args[0].upper()
-        prices = self.stock_collector.get_latest_prices()
 
-        if ticker in prices:
-            price_info = prices[ticker]
-            message = (
-                f"💰 *{ticker} Current Price*\n\n"
-                f"Price: ${price_info['price']:.2f}\n"
-                f"Volume: {price_info['volume']:,}\n"
-                f"Time: {price_info['datetime'].strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-        else:
-            message = f"No price data available for {ticker}. You might need to add it to your watchlist first."
+        # Get multi-timeframe data
+        all_prices = self.stock_collector.get_latest_prices()
+
+        if ticker not in all_prices or not all_prices[ticker]:
+            await update.message.reply_text(f"No price data available for {ticker}. You might need to add it to your watchlist first.")
+            return
+
+        ticker_data = all_prices[ticker]
+        message = f"💰 *{ticker} Multi-Timeframe Analysis*\n\n"
+
+        # Format each timeframe
+        timeframe_names = {
+            'long_term': '📅 Daily',
+            'medium_term': '🕐 Hourly',
+            'short_term': '⏱️ 15-minute'
+        }
+
+        for timeframe, price_info in ticker_data.items():
+            display_name = timeframe_names.get(timeframe, timeframe)
+            message += f"{display_name}:\n"
+            message += f"  Price: ${price_info['price']:.2f}\n"
+            message += f"  Volume: {price_info['volume']:,}\n"
+            message += f"  Time: {price_info['datetime'].strftime('%Y-%m-%d %H:%M')}\n\n"
+
+        # Get technical indicators for each timeframe
+        try:
+            summary = self.stock_collector.get_summary(ticker)
+            if 'timeframes' in summary:
+                message += "*Technical Indicators:*\n\n"
+                for timeframe, tf_data in summary['timeframes'].items():
+                    if 'indicators' in tf_data:
+                        display_name = timeframe_names.get(timeframe, timeframe)
+                        indicators = tf_data['indicators']
+                        message += f"{display_name}:\n"
+                        message += f"  RSI: {indicators.get('rsi', 'N/A'):.1f}\n"
+                        message += f"  MA Trend: {indicators.get('ma_trend', 'N/A').upper()}\n"
+                        message += f"  Volume Ratio: {indicators.get('volume_ratio', 'N/A'):.2f}x\n\n"
+        except Exception as e:
+            logger.error(f"Error getting technical indicators: {e}")
 
         await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
@@ -296,61 +349,146 @@ class TelegramBot:
         await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
     async def check_pattern(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /pattern <ticker> command to check for patterns using TA-Lib."""
+        """Handle /pattern <ticker> command with multi-timeframe analysis."""
         if not context.args:
             await update.message.reply_text("Please provide a ticker symbol: /pattern AAPL")
             return
-
         ticker = context.args[0].upper()
 
-        # Get stock data from the collector
-        data = self.stock_collector.get_data(ticker)
+        # Get multi-timeframe data
+        all_data = self.stock_collector.get_multi_timeframe_data(ticker)
 
-        if data.empty:
+        if not all_data:
             await update.message.reply_text(f"No data available for {ticker}. Make sure it's in your watchlist.")
             return
 
-        # Analyze patterns using TA-Lib
-        detected_patterns = self.pattern_recognizer.detect_patterns(data)
+        message = f"📊 *Multi-Timeframe Pattern Analysis for {ticker}*\n\n"
+        combined_signals = {}
+        pattern_counts = {'long_term': 0, 'medium_term': 0, 'short_term': 0}
 
-        if not detected_patterns:
-            await update.message.reply_text(f"No candlestick patterns detected for {ticker}.")
-            return
+        timeframe_names = {
+            'long_term': '📅 Daily',
+            'medium_term': '🕐 Hourly',
+            'short_term': '⏱️ 15-minute'
+        }
 
-        # Format pattern information
-        current_price = data['close'].iloc[-1]
-        message = f"📊 *Candlestick Pattern Analysis for {ticker}*\n\n"
-        message += f"Current Price: ${current_price:.2f}\n\n"
+        # Analyze patterns for each timeframe
+        for timeframe, data in all_data.items():
+            if data.empty:
+                continue
 
-        for pattern_name, occurrences in detected_patterns.items():
-            # Only show most recent occurrence of each pattern
-            latest_occurrence = max(occurrences, key=lambda x: x['timestamp'])
-            signal = self.pattern_recognizer.get_trading_signal(
-                pattern_name,
-                latest_occurrence['signal'],
-                current_price
-            )
+            patterns = self.pattern_recognizer.detect_patterns(data)
 
-            message += f"🎯 *{pattern_name}*\n"
-            message += f"Time: {latest_occurrence['timestamp'].strftime('%Y-%m-%d %H:%M')}\n"
-            message += f"Signal: {latest_occurrence['signal']}\n"
+            if patterns:
+                current_price = data['close'].iloc[-1]
+                indicators = self.stock_collector.calculate_technical_indicators(data)
+                pattern_counts[timeframe] = len(patterns)
 
-            if signal['action']:
-                message += f"Action: *{signal['action']}*\n"
-                message += f"Reason: {signal['reason']}\n"
-                message += f"Confidence: {signal['confidence'].upper()}\n"
-                if signal['action'] in ['BUY', 'SELL']:
-                    message += f"Entry: ${signal['entry_price']:.2f}, SL: ${signal['stop_loss']:.2f}, TP: ${signal['take_profit']:.2f}\n"
-            else:
-                message += "No actionable signal currently\n"
+                # Process patterns for combined analysis
+                for pattern_name, occurrences in patterns.items():
+                    if occurrences:
+                        latest_occurrence = max(occurrences, key=lambda x: x['timestamp'])
+                        signal = self.pattern_recognizer.get_trading_signal(
+                            pattern_name,
+                            latest_occurrence['signal'],
+                            current_price,
+                            atr=indicators.get('atr'),
+                            volume_ratio=indicators.get('volume_ratio', 1.0),
+                            additional_indicators=indicators
+                        )
 
+                        # Store for combined analysis
+                        if timeframe not in combined_signals:
+                            combined_signals[timeframe] = []
+                        combined_signals[timeframe].append({
+                            'pattern': pattern_name,
+                            'signal': signal
+                        })
+
+        # Create a summary section for patterns found
+        if any(pattern_counts.values()):
+            message += "📈 *Patterns Detected:*\n"
+            for timeframe, count in pattern_counts.items():
+                if count > 0:
+                    display_name = timeframe_names.get(timeframe, timeframe)
+                    message += f"{display_name}: {count} patterns\n"
             message += "\n"
 
-        # Limit message length to avoid Telegram API errors
-        if len(message) > 4000:
-            message = message[:3900] + "\n\n... (Message truncated)"
+        # Combine signals from all timeframes
+        if combined_signals:
+            combined_action, combined_confidence = self._combine_timeframe_signals(combined_signals)
+
+            message += "*📊 Combined Signal:*\n"
+            message += f"Action: *{combined_action}*\n"
+            message += f"Confidence: {combined_confidence.upper()}\n\n"
+
+            # Add key pattern details only for strong signals
+            if combined_action in ['BUY', 'SELL'] and combined_confidence in ['high', 'very_high']:
+                message += "✅ *Strong Signal Alert*\n"
+                message += "Multiple timeframes are aligned for this trade opportunity.\n\n"
+
+                # Show only the most relevant pattern for each timeframe
+                for timeframe, signals in combined_signals.items():
+                    if signals:
+                        # Get the strongest signal
+                        strongest_signal = max(signals, key=lambda x: self.confidence_thresholds.get(x['signal']['confidence'], 0))
+
+                        display_name = timeframe_names.get(timeframe, timeframe)
+                        message += f"{display_name}: {strongest_signal['pattern']} ({strongest_signal['signal']['action']})\n"
+            else:
+                message += "⚠️ Weak or conflicting signals across timeframes.\n"
+        else:
+            message += "No significant patterns detected in any timeframe.\n"
+
+        # Add current price
+        try:
+            latest_prices = self.stock_collector.get_latest_prices()
+            if ticker in latest_prices and 'short_term' in latest_prices[ticker]:
+                current_price = latest_prices[ticker]['short_term']['price']
+                message += f"\n💰 Current Price: ${current_price:.2f}"
+        except Exception as e:
+            logger.error(f"Error getting current price: {e}")
 
         await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+    def _combine_timeframe_signals(self, signals):
+        """Combine signals from all timeframes to generate a comprehensive trading decision."""
+        combined_strength = 0
+        action_scores = {'BUY': 0, 'SELL': 0, 'HOLD': 0, 'WATCH': 0}
+        for timeframe, signal_list in signals.items():
+            weight = self.timeframe_weights.get(timeframe, 0.33)
+
+            for signal_item in signal_list:
+                signal = signal_item['signal'] if isinstance(signal_item, dict) else signal_item
+                if signal and signal['action']:
+                    confidence_value = self.confidence_thresholds.get(signal['confidence'], 0.5)
+
+                    if signal['action'] == 'BUY':
+                        combined_strength += weight * confidence_value
+                        action_scores['BUY'] += weight * confidence_value
+                    elif signal['action'] == 'SELL':
+                        combined_strength -= weight * confidence_value
+                        action_scores['SELL'] += weight * confidence_value
+                    elif signal['action'] == 'HOLD':
+                        action_scores['HOLD'] += weight * confidence_value
+                    else:  # WATCH
+                        action_scores['WATCH'] += weight * confidence_value
+
+        # Determine final action
+        if combined_strength > 0.6:
+            action = 'BUY'
+            confidence = 'high'
+        elif combined_strength < -0.6:
+            action = 'SELL'
+            confidence = 'high'
+        else:
+            # Find the action with highest score
+            action = max(action_scores, key=action_scores.get)
+            if action_scores[action] > 0.5:
+                confidence = 'medium_high'
+            else:
+                confidence = 'medium'
+
+        return action, confidence
 
     async def latest_news(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /latest command."""

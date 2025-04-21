@@ -2,25 +2,33 @@ import logging
 import yfinance as yf
 import pandas as pd
 import datetime
-import time
 import threading
-from cachetools import TTLCache
+import talib
 logger = logging.getLogger(__name__)
 class MultiStockCollector:
-    def __init__(self, window_size=30, interval_seconds=60):
-        self.window_minutes = window_size
-        self.interval = interval_seconds
+    def __init__(self):
+
         self.watchlist = set()
-
-        # Initialize TTLCache with time-to-live set to window size in seconds
-        self.data_cache = TTLCache(maxsize=10000, ttl=window_size * 60)
-        self.is_running = False
-        self.collector_thread = None
         self.lock = threading.Lock()
-
-    def _get_cache_key(self, ticker_symbol, timestamp):
-        """Create a unique cache key for each ticker and timestamp."""
-        return f"{ticker_symbol}_{timestamp.strftime('%Y%m%d_%H%M%S')}"
+        # Default time intervals for multi-timeframe analysis
+        self.timeframes = {
+            'short_term': {'interval': '15m', 'weight': 0.2},
+            'medium_term': {'interval': '1h', 'weight': 0.3},
+            'long_term': {'interval': '1d', 'weight': 0.5}
+        }
+        self.interval_to_minutes = {
+            '1m': 1,
+            '2m': 2,
+            '5m': 5,
+            '15m': 15,
+            '30m': 30,
+            '60m': 60,
+            '1h': 60,
+            '1d': 1440,
+            '5d': 7200,
+            '1wk': 10080,
+            '1mo': 43200  # Approximate
+        }
 
     def add_stock(self, ticker_symbol):
         """Add a stock to the watchlist."""
@@ -38,10 +46,6 @@ class MultiStockCollector:
         with self.lock:
             if ticker_symbol in self.watchlist:
                 self.watchlist.remove(ticker_symbol)
-                # Remove all cached entries for this ticker
-                keys_to_remove = [key for key in self.data_cache.keys() if key.startswith(f"{ticker_symbol}_")]
-                for key in keys_to_remove:
-                    self.data_cache.pop(key, None)
                 logger.info(f"Removed {ticker_symbol} from watchlist")
                 return True
             else:
@@ -52,114 +56,165 @@ class MultiStockCollector:
         """Return current watchlist."""
         return list(self.watchlist)
 
-    def fetch_current_data(self, ticker_symbol):
-        """Get the most recent stock data using yfinance."""
+    def get_data(self, ticker_symbol, interval='5m', period='1d'):
+        """
+        Fetch recent data for a specific ticker using yfinance.
+        Enhanced to support different intervals for multi-timeframe analysis.
+        """
         try:
             stock = yf.Ticker(ticker_symbol)
-            # Fetch the last few minutes of data to catch any we might have missed
-            hist = stock.history(period='1d', interval='1m', prepost=True)
+            # Fetch data with prepost included to get more complete data
+            end = datetime.datetime.now()
+            start = end - datetime.timedelta(minutes=5 * self.interval_to_minutes.get(interval))
+            data = stock.history(period=period, interval=interval, start= start, end=end, prepost=True)
 
-            if not hist.empty:
-                # Get the most recent data points from the last few minutes
-                # This helps if the collection loop was delayed
-                now = pd.Timestamp.now(tz='UTC')
-                two_minutes_ago = now - pd.Timedelta(minutes=2)
+            # Reset index and convert to the same format
+            if not data.empty:
+                data = data.reset_index()
+                data = data.rename(columns={
+                    'Datetime': 'datetime',
+                    'Date': 'datetime',
+                    'Open': 'open',
+                    'High': 'high',
+                    'Low': 'low',
+                    'Close': 'close',
+                    'Volume': 'volume'
+                })
 
-                recent_data = hist[hist.index >= two_minutes_ago]
+                # Ensure datetime column is timezone-aware
+                if 'datetime' in data.columns and data['datetime'].dt.tz is None:
+                    data['datetime'] = data['datetime'].dt.tz_localize('UTC')
 
-                if not recent_data.empty:
-                    data_list = []
-                    for timestamp, row in recent_data.iterrows():
-                        data_list.append({
-                            'datetime': timestamp,
-                            'open': row['Open'],
-                            'high': row['High'],
-                            'low': row['Low'],
-                            'close': row['Close'],
-                            'volume': row['Volume']
-                        })
-                    return data_list
+                # Fix zero volume issues
+                data = self._fix_zero_volume(data, interval)
+
+            return data
         except Exception as e:
             logger.error(f"Error fetching data for {ticker_symbol}: {e}")
-        return []
-
-    def update_cache(self, ticker_symbol):
-        """Update cache with new data points."""
-        new_data_list = self.fetch_current_data(ticker_symbol)
-
-        if new_data_list:
-            with self.lock:
-                for new_data in new_data_list:
-                    if new_data['datetime'].tzinfo is None:
-                        new_data['datetime'] = new_data['datetime'].tz_localize('UTC')
-
-                    # Create cache key and store data
-                    cache_key = self._get_cache_key(ticker_symbol, new_data['datetime'])
-
-                    # Only add if not already in cache to avoid duplicates
-                    if cache_key not in self.data_cache:
-                        self.data_cache[cache_key] = new_data
-
-    def collector_loop(self):
-        """Main collection loop running in background."""
-        while self.is_running:
-            watchlist_copy = list(self.watchlist)
-
-            for ticker in watchlist_copy:
-                if ticker in self.watchlist:
-                    self.update_cache(ticker)
-
-            time.sleep(self.interval)
-
-    def start(self):
-        """Start the data collection process."""
-        if not self.is_running:
-            self.is_running = True
-            self.collector_thread = threading.Thread(target=self.collector_loop)
-            self.collector_thread.daemon = True
-            self.collector_thread.start()
-            logger.info(f"Started collecting data every {self.interval} seconds")
-
-    def stop(self):
-        """Stop the data collection process."""
-        self.is_running = False
-        if self.collector_thread:
-            self.collector_thread.join()
-        logger.info("Stopped collecting data")
-
-    def get_data(self, ticker_symbol):
-        """Return a DataFrame of the current cached data for a specific ticker."""
-        data_entries = []
-        with self.lock:
-            # Extract all entries for this ticker from the cache
-            for key, value in self.data_cache.items():
-                if key.startswith(f"{ticker_symbol}_"):
-                    data_entries.append(value)
-
-        if not data_entries:
             return pd.DataFrame()
 
-        # Sort by datetime and create DataFrame
-        data_entries.sort(key=lambda x: x['datetime'])
-        return pd.DataFrame(data_entries)
+    def _fix_zero_volume(self, data, interval):
+        """Fix zero volume issues in the data."""
+        if data.empty:
+            return data
+
+        # Check for zero volume rows
+        zero_volume_rows = data[data['volume'] == 0]
+
+        if not zero_volume_rows.empty:
+            logger.warning(f"Found {len(zero_volume_rows)} rows with zero volume")
+
+            # For intraday data, try to fill zero volumes with interpolation
+            if interval in ['5m','15m', '30m', '60m', '1h']:
+                # First try forward fill, then backward fill for remaining
+                data['volume'] = data['volume'].replace(0, pd.NA)
+                data['volume'] = data['volume'].ffill().bfill()
+
+                # If still zeros, use average of nearby non-zero volumes
+                if (data['volume'] == 0).any():
+                    data['volume'] = data['volume'].replace(0, pd.NA)
+                    data['volume'] = data['volume'].interpolate(method='linear', limit_direction='both')
+
+                # As last resort, use a minimum threshold based on daily average
+                daily_avg = data['volume'].mean()
+                if daily_avg > 0:
+                    min_volume = max(100, int(daily_avg * 0.01))  # At least 1% of average or 100
+                    data.loc[data['volume'] < min_volume, 'volume'] = min_volume
+
+        return data
+
+    def get_multi_timeframe_data(self, ticker_symbol):
+        """Get data for all timeframes."""
+        data = {}
+        for tf_name, tf_config in self.timeframes.items():
+            # Extract interval from the configuration dictionary
+            interval = tf_config['interval'] if isinstance(tf_config, dict) else tf_config
+            timeframe_data = self.get_data(ticker_symbol, interval=interval)
+            data[tf_name] = timeframe_data
+
+        return data
+
+    def calculate_technical_indicators(self, data):
+        """Calculate technical indicators for the data."""
+        if data.empty:
+            return {}
+
+        try:
+            indicators = {}
+
+            # Ensure we have enough data points for indicators
+            if len(data) < 20:
+                logger.warning(f"Insufficient data points ({len(data)}) for technical indicators")
+                return {}
+
+            # RSI
+            if len(data) >= 14:
+                indicators['rsi'] = talib.RSI(data['close'], timeperiod=14).iloc[-1]
+
+            # MACD
+            if len(data) >= 26:
+                macd, signal, hist = talib.MACD(data['close'])
+                indicators['macd'] = macd.iloc[-1]
+                indicators['macd_signal'] = signal.iloc[-1]
+                indicators['macd_hist'] = hist.iloc[-1]
+
+            # Moving Averages
+            if len(data) >= 20:
+                sma_20 = talib.SMA(data['close'], timeperiod=20).iloc[-1]
+                indicators['sma_20'] = sma_20
+
+            if len(data) >= 50:
+                sma_50 = talib.SMA(data['close'], timeperiod=50).iloc[-1]
+                indicators['sma_50'] = sma_50
+
+                # Moving Average trend
+                if 'sma_20' in indicators and 'sma_50' in indicators:
+                    if indicators['sma_20'] > indicators['sma_50']:
+                        indicators['ma_trend'] = 'bullish'
+                    elif indicators['sma_20'] < indicators['sma_50']:
+                        indicators['ma_trend'] = 'bearish'
+                    else:
+                        indicators['ma_trend'] = 'neutral'
+
+            # ATR for volatility
+            if len(data) >= 14:
+                indicators['atr'] = talib.ATR(data['high'], data['low'], data['close']).iloc[-1]
+
+            # Volume ratio
+            if len(data) >= 10:
+                recent_volume = data['volume'].tail(5).mean()
+                prior_volume = data['volume'].tail(10).head(5).mean()
+                indicators['volume_ratio'] = recent_volume / prior_volume if prior_volume > 0 else 1.0
+
+            return indicators
+        except Exception as e:
+            logger.error(f"Error calculating indicators: {e}")
+            return {}
 
     def get_summary(self, ticker_symbol):
-        """Get summary statistics of cached data for a specific ticker."""
-        data = self.get_data(ticker_symbol)
+        """Get enhanced summary statistics for a specific ticker."""
+        all_data = self.get_multi_timeframe_data(ticker_symbol)
 
-        if data.empty:
-            return f"No data available for {ticker_symbol}"
+        summaries = {}
+        for timeframe, data in all_data.items():
+            if not data.empty:
+                indicators = self.calculate_technical_indicators(data)
+                summaries[timeframe] = {
+                    'entries': len(data),
+                    'start_time': data['datetime'].min(),
+                    'end_time': data['datetime'].max(),
+                    'avg_close': data['close'].mean(),
+                    'min_close': data['close'].min(),
+                    'max_close': data['close'].max(),
+                    'total_volume': data['volume'].sum(),
+                    'avg_volume': data['volume'].mean(),
+                    'zero_volume_count': len(data[data['volume'] == 0]),
+                    'indicators': indicators
+                }
 
         return {
             'ticker': ticker_symbol,
-            'entries': len(data),
-            'window_minutes': self.window_minutes,
-            'start_time': data['datetime'].min(),
-            'end_time': data['datetime'].max(),
-            'avg_close': data['close'].mean(),
-            'min_close': data['close'].min(),
-            'max_close': data['close'].max(),
-            'total_volume': data['volume'].sum()
+            'timeframes': summaries
         }
 
     def get_all_summaries(self):
@@ -170,7 +225,7 @@ class MultiStockCollector:
         return summaries
 
     def save_to_csv(self, ticker_symbol=None, filename=None):
-        """Save cached data to CSV file."""
+        """Save data to CSV file."""
         if ticker_symbol is None:
             # Save all stocks data
             for ticker in self.watchlist:
@@ -181,27 +236,42 @@ class MultiStockCollector:
 
     def _save_single_csv(self, ticker_symbol, filename=None):
         """Helper method to save a single stock's data to CSV."""
-        data = self.get_data(ticker_symbol)
+        all_data = self.get_multi_timeframe_data(ticker_symbol)
 
-        if filename is None:
-            filename = f"{ticker_symbol}_cache_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        for timeframe, data in all_data.items():
+            if filename is None:
+                tf_filename = f"{ticker_symbol}_{timeframe}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            else:
+                tf_filename = f"{filename}_{timeframe}.csv"
 
-        if not data.empty:
-            data.to_csv(filename, index=False)
-            logger.info(f"Data saved to {filename}")
-        else:
-            logger.info(f"No data to save for {ticker_symbol}")
+            if not data.empty:
+                data.to_csv(tf_filename, index=False)
+                logger.info(f"Data saved to {tf_filename}")
+            else:
+                logger.info(f"No data to save for {ticker_symbol} at {timeframe}")
 
     def get_latest_prices(self):
-        """Get the latest price for each stock in watchlist."""
+        """Get the latest price for each stock in watchlist across all timeframes."""
         latest_prices = {}
         for ticker in self.watchlist:
-            data = self.get_data(ticker)
-            if not data.empty:
-                latest_row = data.iloc[-1]
-                latest_prices[ticker] = {
-                    'datetime': latest_row['datetime'],
-                    'price': latest_row['close'],
-                    'volume': latest_row['volume']
-                }
+            all_data = self.get_multi_timeframe_data(ticker)
+            ticker_prices = {}
+
+            for timeframe, data in all_data.items():
+                if not data.empty:
+                    latest_row = data.iloc[-1]
+                    ticker_prices[timeframe] = {
+                        'datetime': latest_row['datetime'],
+                        'price': latest_row['close'],
+                        'volume': latest_row['volume']
+                    }
+
+            if ticker_prices:
+                latest_prices[ticker] = ticker_prices
+
         return latest_prices
+
+    def set_timeframes(self, timeframes):
+        """Set custom timeframes configuration."""
+        self.timeframes = timeframes
+        logger.info(f"Timeframes updated: {timeframes}")

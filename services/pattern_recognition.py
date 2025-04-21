@@ -3,12 +3,9 @@ import pandas as pd
 import talib
 from typing import Dict, List, Optional
 import logging
-
 logger = logging.getLogger(__name__)
-
 class TalibPatternRecognition:
     def __init__(self):
-        # Mapping of pattern functions to their names and significance
         self.pattern_functions = {
             'Two Crows': talib.CDL2CROWS,
             'Three Black Crows': talib.CDL3BLACKCROWS,
@@ -72,15 +69,15 @@ class TalibPatternRecognition:
             'Upside Gap Two Crows': talib.CDLUPSIDEGAP2CROWS,
             'Upside/Downside Gap Three Methods': talib.CDLXSIDEGAP3METHODS
         }
-
-        # Pattern type to signal interpretation
-        self.pattern_types = {
-            'bullish': ['Morning Star', 'Morning Doji Star', 'Three White Soldiers', 'Hammer',
-                        'Inverted Hammer', 'Piercing Line', 'Bullish Engulfing'],
-            'bearish': ['Evening Star', 'Evening Doji Star', 'Three Black Crows', 'Hanging Man',
-                        'Shooting Star', 'Dark Cloud Cover', 'Bearish Engulfing'],
-            'reversal': ['Doji', 'Spinning Top', 'Harami', 'Harami Cross'],
-            'continuation': ['Rising Three Methods', 'Falling Three Methods']
+        # Priority-based pattern categorization
+        self.pattern_priorities = {
+            1: ['Engulfing Pattern', 'Morning Star', 'Evening Star', 'Abandoned Baby',
+                'Three Advancing White Soldiers', 'Three Black Crows'],
+            2: ['Hammer', 'Shooting Star', 'Hanging Man', 'Inverted Hammer',
+                'Dark Cloud Cover', 'Piercing Line'],
+            3: ['Mat Hold', 'Three Line Strike', 'Tasuki Gap', 'Separating Lines'],
+            4: ['Doji', 'Spinning Top', 'Harami Pattern', 'Harami Cross Pattern'],
+            5: ['High-Wave Candle', 'Long Legged Doji', 'Rickshaw Man', 'Marubozu']
         }
 
     def detect_patterns(self, data: pd.DataFrame) -> Dict[str, List]:
@@ -111,7 +108,8 @@ class TalibPatternRecognition:
                             'index': int(idx),
                             'timestamp': data.index[idx],
                             'signal': int(result[idx]),  # 100, -100, etc.
-                            'price': float(close_prices[idx])
+                            'price': float(close_prices[idx]),
+                            'priority': self._get_pattern_priority(pattern_name)
                         }
                         for idx in pattern_indices
                     ]
@@ -120,40 +118,208 @@ class TalibPatternRecognition:
 
         return detected_patterns
 
-    def get_trading_signal(self, pattern_name: str, signal_value: int, current_price: float) -> Dict:
-        """Generate trading signal based on pattern and signal value."""
+    def _get_pattern_priority(self, pattern_name: str) -> int:
+        """Get the priority of a pattern based on its reliability."""
+        for priority, patterns in self.pattern_priorities.items():
+            if pattern_name in patterns:
+                return priority
+        return 6  # Default priority for unlisted patterns
+
+    def get_trading_signal(self, pattern_name: str, signal_value: int, current_price: float,
+                           atr: Optional[float] = None, volume_ratio: float = 1.0,
+                           additional_indicators: Dict = None) -> Dict:
+        """Generate enhanced trading signal based on pattern and additional context."""
         signal = {
             'action': None,
             'reason': '',
             'confidence': 'medium',
             'entry_price': current_price,
             'stop_loss': None,
-            'take_profit': None
+            'take_profit': None,
+            'pattern_type': None,
+            'risk_reward_ratio': None,
+            'additional_context': {}
         }
 
-        # Interpret signal
+        # Categorize pattern
+        pattern_type = self._categorize_pattern(pattern_name)
+        signal['pattern_type'] = pattern_type
+
+        # Calculate adaptive stop loss and take profit based on ATR
+        if atr:
+            stop_distance = atr * 2  # 2 ATR for stop loss
+            profit_distance = atr * 3  # 3 ATR for take profit
+        else:
+            # Default to percentage-based
+            stop_distance = current_price * 0.02
+            profit_distance = current_price * 0.05
+
+        # Adjust confidence based on signal strength, volume, and additional indicators
+        confidence_level = self._calculate_enhanced_confidence(
+            signal_value, volume_ratio, pattern_name, additional_indicators
+        )
+        signal['confidence'] = confidence_level
+
+        # Add additional context
+        if additional_indicators:
+            signal['additional_context'] = additional_indicators
+
+        # Generate trading signal
         if signal_value > 0:  # Bullish signal
-            if pattern_name in self.pattern_types['bullish']:
+            if pattern_type == 'bullish_reversal' or pattern_type == 'bullish_continuation':
                 signal['action'] = 'BUY'
                 signal['reason'] = f'Bullish {pattern_name} pattern detected'
-                signal['confidence'] = 'high' if signal_value >= 100 else 'medium'
-                signal['stop_loss'] = current_price * 0.98  # 2% stop loss
-                signal['take_profit'] = current_price * 1.05  # 5% take profit
-            elif pattern_name in self.pattern_types['reversal']:
+                signal['stop_loss'] = current_price - stop_distance
+                signal['take_profit'] = current_price + profit_distance
+            elif pattern_type == 'neutral':
+                signal['action'] = 'HOLD'
+                signal['reason'] = f'Neutral pattern {pattern_name} - monitor for confirmation'
+            else:
                 signal['action'] = 'WATCH'
-                signal['reason'] = f'Potential reversal pattern: {pattern_name}'
-                signal['confidence'] = 'low'
+                signal['reason'] = f'Conflicting signal for {pattern_name}'
 
         elif signal_value < 0:  # Bearish signal
-            if pattern_name in self.pattern_types['bearish']:
+            if pattern_type == 'bearish_reversal' or pattern_type == 'bearish_continuation':
                 signal['action'] = 'SELL'
                 signal['reason'] = f'Bearish {pattern_name} pattern detected'
-                signal['confidence'] = 'high' if signal_value <= -100 else 'medium'
-                signal['stop_loss'] = current_price * 1.02  # 2% stop loss
-                signal['take_profit'] = current_price * 0.95  # 5% take profit
-            elif pattern_name in self.pattern_types['reversal']:
+                signal['stop_loss'] = current_price + stop_distance
+                signal['take_profit'] = current_price - profit_distance
+            elif pattern_type == 'neutral':
+                signal['action'] = 'HOLD'
+                signal['reason'] = f'Neutral pattern {pattern_name} - monitor for confirmation'
+            else:
                 signal['action'] = 'WATCH'
-                signal['reason'] = f'Potential reversal pattern: {pattern_name}'
-                signal['confidence'] = 'low'
+                signal['reason'] = f'Conflicting signal for {pattern_name}'
+
+        # Calculate risk-reward ratio
+        if signal['stop_loss'] and signal['take_profit']:
+            risk = abs(current_price - signal['stop_loss'])
+            reward = abs(signal['take_profit'] - current_price)
+            if risk > 0:
+                signal['risk_reward_ratio'] = reward / risk
 
         return signal
+
+    def _categorize_pattern(self, pattern_name: str) -> str:
+        """Categorize the pattern type more accurately."""
+        # Bullish reversal patterns
+        if pattern_name in ['Morning Star', 'Morning Doji Star', 'Hammer',
+                            'Inverted Hammer', 'Piercing Line',
+                            'Three Advancing White Soldiers', 'Ladder Bottom',
+                            'Concealing Baby Swallow', 'Unique 3 River']:
+            return 'bullish_reversal'
+
+        # Special cases for patterns that can be both bullish and bearish
+        if pattern_name == 'Engulfing Pattern':
+            return 'both_reversal'
+        if pattern_name == 'Abandoned Baby':
+            return 'both_reversal'
+
+        # Bearish reversal patterns
+        if pattern_name in ['Evening Star', 'Evening Doji Star', 'Hanging Man',
+                            'Shooting Star', 'Dark Cloud Cover', 'Three Black Crows',
+                            'Two Crows', 'Upside Gap Two Crows', 'Advance Block']:
+            return 'bearish_reversal'
+
+        # Bullish continuation patterns
+        if pattern_name in ['Mat Hold', 'Three Line Strike', 'Tasuki Gap',
+                            'Separating Lines', 'Kicking', 'Kicking by Length']:
+            return 'bullish_continuation'
+
+        # Special case for Rising/Falling Three Methods
+        if pattern_name == 'Rising/Falling Three Methods':
+            return 'both_continuation'
+
+        # Bearish continuation patterns
+        if pattern_name in ['Falling Three Methods', 'In-Neck Pattern',
+                            'On-Neck Pattern', 'Thrusting Pattern']:
+            return 'bearish_continuation'
+
+        # Neutral patterns (indecision)
+        if pattern_name in ['Doji', 'Spinning Top', 'Harami Pattern',
+                            'Harami Cross Pattern', 'Long Legged Doji',
+                            'Gravestone Doji', 'Dragonfly Doji', 'High-Wave Candle',
+                            'Rickshaw Man']:
+            return 'neutral'
+
+        # Trend patterns
+        if pattern_name in ['Marubozu', 'Long Line Candle', 'Belt-hold',
+                            'Short Line Candle', 'Closing Marubozu']:
+            return 'trend'
+
+        # Undefined patterns
+        return 'unknown'
+
+    def _calculate_enhanced_confidence(self, signal_value: int, volume_ratio: float,
+                                       pattern_name: str, additional_indicators: Dict = None) -> str:
+        """Calculate enhanced confidence level based on multiple factors."""
+        abs_signal = abs(signal_value)
+        pattern_priority = self._get_pattern_priority(pattern_name)
+
+        # Base confidence from signal strength
+        if abs_signal >= 100:
+            base_confidence = 0.8
+        elif abs_signal >= 50:
+            base_confidence = 0.6
+        else:
+            base_confidence = 0.4
+
+        # Adjust for pattern priority
+        priority_multiplier = 1.2 - (pattern_priority - 1) * 0.1  # Range: 1.2 to 0.7
+        base_confidence *= priority_multiplier
+
+        # Adjust for volume
+        if volume_ratio > 1.5:
+            base_confidence *= 1.2
+        elif volume_ratio > 1.0:
+            base_confidence *= 1.1
+        elif volume_ratio < 0.8:
+            base_confidence *= 0.9
+
+        # Adjust for additional indicators if provided
+        if additional_indicators:
+            indicator_score = self._evaluate_indicators(additional_indicators)
+            base_confidence *= indicator_score
+
+        # Convert to confidence level
+        if base_confidence > 0.85:
+            return 'very_high'
+        elif base_confidence > 0.7:
+            return 'high'
+        elif base_confidence > 0.55:
+            return 'medium_high'
+        elif base_confidence > 0.4:
+            return 'medium'
+        else:
+            return 'low'
+
+    def _evaluate_indicators(self, indicators: Dict) -> float:
+        """Evaluate additional indicators to adjust confidence."""
+        score = 1.0
+
+        # RSI confirmation
+        if 'rsi' in indicators:
+            rsi = indicators['rsi']
+            if rsi < 30 or rsi > 70:  # Oversold or overbought
+                score *= 1.2
+            elif 40 < rsi < 60:  # Neutral
+                score *= 0.9
+
+        # MACD confirmation
+        if 'macd' in indicators:
+            macd_signal = indicators.get('macd_signal', 0)
+            if macd_signal > 0:  # Bullish
+                score *= 1.1
+            elif macd_signal < 0:  # Bearish
+                score *= 1.1
+
+        # Moving average confirmation
+        if 'ma_trend' in indicators:
+            if indicators['ma_trend'] == 'bullish':
+                score *= 1.15
+            elif indicators['ma_trend'] == 'bearish':
+                score *= 1.15
+            else:
+                score *= 0.9
+
+        return min(score, 1.5)  # Cap the maximum adjustment

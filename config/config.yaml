@@ -1,22 +1,19 @@
-# config.template.yaml
+
 telegram:
   api_key: ${TELEGRAM_API_KEY}
   chat_id: "-4606618937"
-
 openai:
   api_key: ${OPENAI_API_KEY}
-
-database:
+  database:
   type: "sqlite"
   name: "/app/database/financial_monitor.db"
   backup_enabled: true
   backup_path: "/app/backups"
-
 news_collector:
   interval_seconds: 30
   business_hours:
-    start: 8
-    end: 15
+  start: 8
+  end: 15
   sources:
     - "benzinga"
     - "cnbc"
@@ -29,15 +26,49 @@ news_collector:
     - "wsj.com"
     - "bloomberg.com"
     - "investing.com"
-
 stock_collector:
   window_size: 30
-  interval_seconds: 60
-
+timeframes:
+  long_term:
+    interval: "1h"
+  medium_term:
+    interval: "15m"
+  short_term:
+    interval: "5m"
 pattern_monitor:
-  interval_seconds: 300
-  notification_cooldown: 3600
-
+  interval_seconds: 300  # 5 minutes
+  notification_cooldown: 1800  # 1 hour
+  confidence_thresholds:
+    very_high: 0.9
+    high: 0.7
+    medium_high: 0.6
+    medium: 0.5
+    low: 0.3
+  pattern_priorities:  # Optional: customize pattern priorities
+    1:
+      - "Engulfing Pattern"
+      - "Morning Star"
+      - "Evening Star"
+      - "Abandoned Baby"
+      - "Three Advancing White Soldiers"
+      - "Three Black Crows"
+    2:
+      - "Hammer"
+      - "Shooting Star"
+      - "Hanging Man"
+      - "Inverted Hammer"
+    3:
+      - "Mat Hold"
+      - "Three Line Strike"
+      - "Tasuki Gap"
+    4:
+      - "Doji"
+      - "Spinning Top"
+      - "Harami Pattern"
+    5:
+      - "High-Wave Candle"
+      - "Long Legged Doji"
+      - "Rickshaw Man"
 summarizer:
   max_tokens: 1024
   max_sentences: 150
@@ -47,7 +78,6 @@ summarizer:
   temperature: 0.1
   openai_max_tokens: 1024
   model_name: "ProsusAI/finbert"
-
 logging:
   level: "INFO"
   format: "%(asctime)s - %(levelname)s - %(message)s"
