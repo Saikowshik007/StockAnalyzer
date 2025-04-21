@@ -56,7 +56,6 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Error backing up database: {e}")
 
-    # Rest of the database methods remain the same...
     def save_news_article(self, article_data: dict) -> NewsArticle:
         """Save a news article to the database."""
         session = self.get_session()

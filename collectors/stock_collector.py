@@ -1,37 +1,32 @@
 import logging
-
 import yfinance as yf
 import pandas as pd
 import datetime
 import time
 import threading
+from cachetools import TTLCache
 logger = logging.getLogger(__name__)
-
 class MultiStockCollector:
     def __init__(self, window_size=30, interval_seconds=60):
-        """
-        Initialize a multi-stock data collector with rolling time window.
-
-        Args:
-            window_size (int): Window size in minutes
-            interval_seconds (int): Data collection interval in seconds
-        """
         self.window_minutes = window_size
         self.interval = interval_seconds
         self.watchlist = set()
-        self.data_caches = {}
+
+        # Initialize TTLCache with time-to-live set to window size in seconds
+        self.data_cache = TTLCache(maxsize=10000, ttl=window_size * 60)
         self.is_running = False
         self.collector_thread = None
         self.lock = threading.Lock()
+
+    def _get_cache_key(self, ticker_symbol, timestamp):
+        """Create a unique cache key for each ticker and timestamp."""
+        return f"{ticker_symbol}_{timestamp.strftime('%Y%m%d_%H%M%S')}"
 
     def add_stock(self, ticker_symbol):
         """Add a stock to the watchlist."""
         with self.lock:
             if ticker_symbol not in self.watchlist:
                 self.watchlist.add(ticker_symbol)
-                self.data_caches[f"data_{ticker_symbol}"] = pd.DataFrame(
-                    columns=['datetime', 'open', 'high', 'low', 'close', 'volume']
-                )
                 logger.info(f"Added {ticker_symbol} to watchlist")
                 return True
             else:
@@ -43,7 +38,10 @@ class MultiStockCollector:
         with self.lock:
             if ticker_symbol in self.watchlist:
                 self.watchlist.remove(ticker_symbol)
-                del self.data_caches[f"data_{ticker_symbol}"]
+                # Remove all cached entries for this ticker
+                keys_to_remove = [key for key in self.data_cache.keys() if key.startswith(f"{ticker_symbol}_")]
+                for key in keys_to_remove:
+                    self.data_cache.pop(key, None)
                 logger.info(f"Removed {ticker_symbol} from watchlist")
                 return True
             else:
@@ -58,55 +56,57 @@ class MultiStockCollector:
         """Get the most recent stock data using yfinance."""
         try:
             stock = yf.Ticker(ticker_symbol)
-            hist = stock.history(period='1d', interval='1m')
+            # Fetch the last few minutes of data to catch any we might have missed
+            hist = stock.history(period='1d', interval='1m', prepost=True)
 
             if not hist.empty:
-                latest = hist.iloc[-1]
-                return {
-                    'datetime': hist.index[-1],
-                    'open': latest['Open'],
-                    'high': latest['High'],
-                    'low': latest['Low'],
-                    'close': latest['Close'],
-                    'volume': latest['Volume']
-                }
+                # Get the most recent data points from the last few minutes
+                # This helps if the collection loop was delayed
+                now = pd.Timestamp.now(tz='UTC')
+                two_minutes_ago = now - pd.Timedelta(minutes=2)
+
+                recent_data = hist[hist.index >= two_minutes_ago]
+
+                if not recent_data.empty:
+                    data_list = []
+                    for timestamp, row in recent_data.iterrows():
+                        data_list.append({
+                            'datetime': timestamp,
+                            'open': row['Open'],
+                            'high': row['High'],
+                            'low': row['Low'],
+                            'close': row['Close'],
+                            'volume': row['Volume']
+                        })
+                    return data_list
         except Exception as e:
             logger.error(f"Error fetching data for {ticker_symbol}: {e}")
-        return None
+        return []
 
     def update_cache(self, ticker_symbol):
-        """Update cache with new data and remove expired entries for a specific ticker."""
-        new_data = self.fetch_current_data(ticker_symbol)
+        """Update cache with new data points."""
+        new_data_list = self.fetch_current_data(ticker_symbol)
 
-        if new_data:
-            if new_data['datetime'].tzinfo is None:
-                new_data['datetime'] = new_data['datetime'].tz_localize('UTC')
-
-            cache_key = f"data_{ticker_symbol}"
-            new_row = pd.DataFrame([new_data])
-
+        if new_data_list:
             with self.lock:
-                if not self.data_caches[cache_key].empty:
-                    self.data_caches[cache_key] = pd.concat(
-                        [self.data_caches[cache_key], new_row],
-                        ignore_index=True
-                    )
-                else:
-                    self.data_caches[cache_key] = new_row
+                for new_data in new_data_list:
+                    if new_data['datetime'].tzinfo is None:
+                        new_data['datetime'] = new_data['datetime'].tz_localize('UTC')
 
-                current_time = pd.Timestamp.now('UTC')
-                cutoff_time = current_time - pd.Timedelta(minutes=self.window_minutes)
-                self.data_caches[cache_key] = self.data_caches[cache_key][
-                    self.data_caches[cache_key]['datetime'] > cutoff_time
-                    ]
+                    # Create cache key and store data
+                    cache_key = self._get_cache_key(ticker_symbol, new_data['datetime'])
+
+                    # Only add if not already in cache to avoid duplicates
+                    if cache_key not in self.data_cache:
+                        self.data_cache[cache_key] = new_data
 
     def collector_loop(self):
         """Main collection loop running in background."""
         while self.is_running:
-            watchlist_copy = list(self.watchlist)  # Create a copy to avoid modification during iteration
+            watchlist_copy = list(self.watchlist)
 
             for ticker in watchlist_copy:
-                if ticker in self.watchlist:  # Double-check the ticker is still in watchlist
+                if ticker in self.watchlist:
                     self.update_cache(ticker)
 
             time.sleep(self.interval)
@@ -128,32 +128,39 @@ class MultiStockCollector:
         logger.info("Stopped collecting data")
 
     def get_data(self, ticker_symbol):
-        """Return a copy of the current cached data for a specific ticker."""
-        cache_key = f"data_{ticker_symbol}"
+        """Return a DataFrame of the current cached data for a specific ticker."""
+        data_entries = []
         with self.lock:
-            if cache_key in self.data_caches:
-                return self.data_caches[cache_key].copy()
-        return pd.DataFrame()
+            # Extract all entries for this ticker from the cache
+            for key, value in self.data_cache.items():
+                if key.startswith(f"{ticker_symbol}_"):
+                    data_entries.append(value)
+
+        if not data_entries:
+            return pd.DataFrame()
+
+        # Sort by datetime and create DataFrame
+        data_entries.sort(key=lambda x: x['datetime'])
+        return pd.DataFrame(data_entries)
 
     def get_summary(self, ticker_symbol):
         """Get summary statistics of cached data for a specific ticker."""
-        cache_key = f"data_{ticker_symbol}"
-        with self.lock:
-            if cache_key not in self.data_caches or self.data_caches[cache_key].empty:
-                return f"No data available for {ticker_symbol}"
+        data = self.get_data(ticker_symbol)
 
-            data = self.data_caches[cache_key]
-            return {
-                'ticker': ticker_symbol,
-                'entries': len(data),
-                'window_minutes': self.window_minutes,
-                'start_time': data['datetime'].min(),
-                'end_time': data['datetime'].max(),
-                'avg_close': data['close'].mean(),
-                'min_close': data['close'].min(),
-                'max_close': data['close'].max(),
-                'total_volume': data['volume'].sum()
-            }
+        if data.empty:
+            return f"No data available for {ticker_symbol}"
+
+        return {
+            'ticker': ticker_symbol,
+            'entries': len(data),
+            'window_minutes': self.window_minutes,
+            'start_time': data['datetime'].min(),
+            'end_time': data['datetime'].max(),
+            'avg_close': data['close'].mean(),
+            'min_close': data['close'].min(),
+            'max_close': data['close'].max(),
+            'total_volume': data['volume'].sum()
+        }
 
     def get_all_summaries(self):
         """Get summaries for all stocks in watchlist."""
@@ -174,29 +181,27 @@ class MultiStockCollector:
 
     def _save_single_csv(self, ticker_symbol, filename=None):
         """Helper method to save a single stock's data to CSV."""
-        cache_key = f"data_{ticker_symbol}"
+        data = self.get_data(ticker_symbol)
 
         if filename is None:
             filename = f"{ticker_symbol}_cache_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
 
-        with self.lock:
-            if cache_key in self.data_caches and not self.data_caches[cache_key].empty:
-                self.data_caches[cache_key].to_csv(filename, index=False)
-                logger.info(f"Data saved to {filename}")
-            else:
-                logger.info(f"No data to save for {ticker_symbol}")
+        if not data.empty:
+            data.to_csv(filename, index=False)
+            logger.info(f"Data saved to {filename}")
+        else:
+            logger.info(f"No data to save for {ticker_symbol}")
 
     def get_latest_prices(self):
         """Get the latest price for each stock in watchlist."""
         latest_prices = {}
-        with self.lock:
-            for ticker in self.watchlist:
-                cache_key = f"data_{ticker}"
-                if cache_key in self.data_caches and not self.data_caches[cache_key].empty:
-                    latest_row = self.data_caches[cache_key].iloc[-1]
-                    latest_prices[ticker] = {
-                        'datetime': latest_row['datetime'],
-                        'price': latest_row['close'],
-                        'volume': latest_row['volume']
-                    }
+        for ticker in self.watchlist:
+            data = self.get_data(ticker)
+            if not data.empty:
+                latest_row = data.iloc[-1]
+                latest_prices[ticker] = {
+                    'datetime': latest_row['datetime'],
+                    'price': latest_row['close'],
+                    'volume': latest_row['volume']
+                }
         return latest_prices
