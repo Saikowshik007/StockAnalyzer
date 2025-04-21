@@ -35,6 +35,8 @@ timeframes:
     interval: "15m"
   short_term:
     interval: "5m"
+  very_short_term:
+    interval : "2m"
 pattern_monitor:
   interval_seconds: 300  # 5 minutes
   notification_cooldown: 1800  # 1 hour

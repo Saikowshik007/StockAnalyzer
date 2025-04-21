@@ -40,7 +40,8 @@ class FinancialMonitorApp:
         timeframes = self.config.get('timeframes', {
             'long_term': {'interval': '1d', 'weight': 0.5},
             'medium_term': {'interval': '1h', 'weight': 0.3},
-            'short_term': {'interval': '15m', 'weight': 0.2}
+            'short_term': {'interval': '15m', 'weight': 0.2},
+            'very_short_term': {'interval': '5m', 'weight': 0.2}
         })
         self.stock_collector.set_timeframes(timeframes)
 

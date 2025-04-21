@@ -118,7 +118,7 @@ class TalibPatternMonitor:
                 indicators_by_timeframe[timeframe] = indicators
 
                 # Then detect patterns with context from indicators
-                patterns = self.pattern_recognizer.detect_patterns(data)
+                patterns = self.pattern_recognizer.detect_patterns(data,lookback_periods=5)
 
                 if patterns:
                     # Process patterns with indicator context

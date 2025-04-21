@@ -80,35 +80,54 @@ class TalibPatternRecognition:
             5: ['High-Wave Candle', 'Long Legged Doji', 'Rickshaw Man', 'Marubozu']
         }
 
-    def detect_patterns(self, data: pd.DataFrame) -> Dict[str, List]:
-        """Detect all candlestick patterns in the data."""
+    def detect_patterns(self, data: pd.DataFrame, lookback_periods: int = 10) -> Dict[str, List]:
+        """
+        Detect all candlestick patterns in the data.
+
+        Parameters:
+        - data: DataFrame containing OHLC data
+        - lookback_periods: Number of recent candles to consider for pattern detection (default: 10)
+        """
         if not all(col in data.columns for col in ['open', 'high', 'low', 'close']):
             logger.error("Data must contain 'open', 'high', 'low', 'close' columns")
             return {}
+
+        # Get only the recent data based on lookback_periods
+        # Make sure we have enough data for TA-Lib functions
+        min_periods = max(lookback_periods, 30)  # Some patterns need more historical data
+        if len(data) > min_periods:
+            # Keep more data for calculation but focus on recent periods for detection
+            recent_data = data.tail(min_periods).copy()
+        else:
+            recent_data = data.copy()
 
         detected_patterns = {}
 
         for pattern_name, pattern_func in self.pattern_functions.items():
             try:
                 # Convert data to numpy arrays
-                open_prices = data['open'].values.astype(float)
-                high_prices = data['high'].values.astype(float)
-                low_prices = data['low'].values.astype(float)
-                close_prices = data['close'].values.astype(float)
+                open_prices = recent_data['open'].values.astype(float)
+                high_prices = recent_data['high'].values.astype(float)
+                low_prices = recent_data['low'].values.astype(float)
+                close_prices = recent_data['close'].values.astype(float)
 
                 # Detect pattern
                 result = pattern_func(open_prices, high_prices, low_prices, close_prices)
 
                 # Find where pattern is detected (non-zero values)
-                pattern_indices = np.where(result != 0)[0]
+                # But only consider the last 'lookback_periods' candles for actual signals
+                pattern_indices = np.where(result[-lookback_periods:] != 0)[0]
+
+                # Adjust indices to refer to the correct position in the result array
+                pattern_indices = pattern_indices + (len(result) - lookback_periods)
 
                 if len(pattern_indices) > 0:
                     detected_patterns[pattern_name] = [
                         {
                             'index': int(idx),
-                            'timestamp': data.index[idx],
+                            'timestamp': recent_data.index[idx - (len(result) - len(recent_data))],
                             'signal': int(result[idx]),  # 100, -100, etc.
-                            'price': float(close_prices[idx]),
+                            'price': float(close_prices[idx - (len(result) - len(recent_data))]),
                             'priority': self._get_pattern_priority(pattern_name)
                         }
                         for idx in pattern_indices

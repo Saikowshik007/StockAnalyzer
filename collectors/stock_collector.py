@@ -12,9 +12,10 @@ class MultiStockCollector:
         self.lock = threading.Lock()
         # Default time intervals for multi-timeframe analysis
         self.timeframes = {
-            'short_term': {'interval': '15m', 'weight': 0.2},
-            'medium_term': {'interval': '1h', 'weight': 0.3},
-            'long_term': {'interval': '1d', 'weight': 0.5}
+            'very_short_term': {'interval': '2m', 'weight': 0.2},
+            'short_term': {'interval': '5m', 'weight': 0.2},
+            'medium_term': {'interval': '15m', 'weight': 0.3},
+            'long_term': {'interval': '1h', 'weight': 0.5}
         }
         self.interval_to_minutes = {
             '1m': 1,
@@ -56,17 +57,33 @@ class MultiStockCollector:
         """Return current watchlist."""
         return list(self.watchlist)
 
-    def get_data(self, ticker_symbol, interval='5m', period='1d'):
+    def get_data(self, ticker_symbol, window_minutes=None, interval='5m', period='1d', start=None, end=None):
         """
         Fetch recent data for a specific ticker using yfinance.
         Enhanced to support different intervals for multi-timeframe analysis.
+        Parameters:
+        - start: datetime object or string (YYYY-MM-DD HH:MM:SS)
+        - end: datetime object or string (YYYY-MM-DD HH:MM:SS)
         """
+
         try:
             stock = yf.Ticker(ticker_symbol)
-            # Fetch data with prepost included to get more complete data
-            end = datetime.datetime.now()
-            start = end - datetime.timedelta(minutes=5 * self.interval_to_minutes.get(interval))
-            data = stock.history(period=period, interval=interval, start= start, end=end, prepost=True)
+
+            # Use start and end if provided, otherwise use period
+            if start and end:
+                data = stock.history(start=start, end=end, interval=interval, prepost=True)
+            else:
+                # Determine period based on interval
+
+                if interval == '1h' or interval == '60m':
+                    period = '7d'  # Get 2 months of hourly data
+                elif interval == '15m':
+                    period = '2d'   # Get 7 days of 15-minute data
+                else:
+                    period = '1d'   # Get 5 days of data for other intervals
+
+                # Fetch data with prepost included to get more complete data
+                data = stock.history(period=period, interval=interval, prepost=True)
 
             # Reset index and convert to the same format
             if not data.empty:
@@ -120,7 +137,6 @@ class MultiStockCollector:
                 if daily_avg > 0:
                     min_volume = max(100, int(daily_avg * 0.01))  # At least 1% of average or 100
                     data.loc[data['volume'] < min_volume, 'volume'] = min_volume
-
         return data
 
     def get_multi_timeframe_data(self, ticker_symbol):
@@ -256,7 +272,6 @@ class MultiStockCollector:
         for ticker in self.watchlist:
             all_data = self.get_multi_timeframe_data(ticker)
             ticker_prices = {}
-
             for timeframe, data in all_data.items():
                 if not data.empty:
                     latest_row = data.iloc[-1]

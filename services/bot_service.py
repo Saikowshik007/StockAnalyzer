@@ -4,6 +4,7 @@ import logging
 import re
 
 import pandas as pd
+from pyexpat.errors import messages
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from telegram.constants import ParseMode
@@ -30,7 +31,7 @@ class TelegramBot:
         self.confidence_thresholds = {
             'very_high': 0.9,
             'high': 0.7,
-            'medium_high': 0.6,
+            'medium-high': 0.6,
             'medium': 0.5,
             'low': 0.3
         }
@@ -299,9 +300,10 @@ class TelegramBot:
 
         # Format each timeframe
         timeframe_names = {
-            'long_term': '📅 Daily',
-            'medium_term': '🕐 Hourly',
-            'short_term': '⏱️ 15-minute'
+            'long_term': '📅 Hourly',
+            'medium_term': '🕐 15 minute',
+            'short_term': '⏱️ 5 minute',
+            "very_short_term": '⏱️ 2 minute'
         }
 
         for timeframe, price_info in ticker_data.items():
@@ -321,9 +323,24 @@ class TelegramBot:
                         display_name = timeframe_names.get(timeframe, timeframe)
                         indicators = tf_data['indicators']
                         message += f"{display_name}:\n"
-                        message += f"  RSI: {indicators.get('rsi', 'N/A'):.1f}\n"
-                        message += f"  MA Trend: {indicators.get('ma_trend', 'N/A').upper()}\n"
-                        message += f"  Volume Ratio: {indicators.get('volume_ratio', 'N/A'):.2f}x\n\n"
+
+                        # Handle RSI - safely format only if it's a number
+                        rsi = indicators.get('rsi')
+                        if rsi is not None and isinstance(rsi, (int, float)):
+                            message += f"  RSI: {rsi:.1f}\n"
+                        else:
+                            message += f"  RSI: {rsi}\n"
+
+                        # Handle MA Trend
+                        ma_trend = indicators.get('ma_trend', 'N/A')
+                        message += f"  MA Trend: {ma_trend.upper() if isinstance(ma_trend, str) else ma_trend}\n"
+
+                        # Handle Volume Ratio - safely format only if it's a number
+                        vol_ratio = indicators.get('volume_ratio')
+                        if vol_ratio is not None and isinstance(vol_ratio, (int, float)):
+                            message += f"  Volume Ratio: {vol_ratio:.2f}x\n\n"
+                        else:
+                            message += f"  Volume Ratio: {vol_ratio}\n\n"
         except Exception as e:
             logger.error(f"Error getting technical indicators: {e}")
 
@@ -347,7 +364,6 @@ class TelegramBot:
             message += f"{data.timestamp.strftime('%Y-%m-%d %H:%M')} - ${data.close:.2f}\n"
 
         await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
-
     async def check_pattern(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /pattern <ticker> command with multi-timeframe analysis."""
         if not context.args:
@@ -359,25 +375,26 @@ class TelegramBot:
         all_data = self.stock_collector.get_multi_timeframe_data(ticker)
 
         if not all_data:
-            await update.message.reply_text(f"No data available for {ticker}. Make sure it's in your watchlist.")
+            await update.message.reply_text(f"No data available for {ticker} Make sure it's in your watchlist")
             return
 
-        message = f"📊 *Multi-Timeframe Pattern Analysis for {ticker}*\n\n"
+        message = f"📊 *Multi Timeframe Pattern Analysis for {ticker}*\n\n"
         combined_signals = {}
         pattern_counts = {'long_term': 0, 'medium_term': 0, 'short_term': 0}
 
         timeframe_names = {
-            'long_term': '📅 Daily',
-            'medium_term': '🕐 Hourly',
-            'short_term': '⏱️ 15-minute'
+            'long_term': '📅 Hourly',
+            'medium_term': '🕐 15 minute',
+            'short_term': '⏱️ 5 minute',
+            "very_short_term": '⏱️ 2 minute'
         }
 
         # Analyze patterns for each timeframe
         for timeframe, data in all_data.items():
-            if data.empty:
+            if data.empty or timeframe == 'very_short_term':
                 continue
 
-            patterns = self.pattern_recognizer.detect_patterns(data)
+            patterns = self.pattern_recognizer.detect_patterns(data,lookback_periods=3)
 
             if patterns:
                 current_price = data['close'].iloc[-1]
@@ -418,14 +435,14 @@ class TelegramBot:
         if combined_signals:
             combined_action, combined_confidence = self._combine_timeframe_signals(combined_signals)
 
-            message += "*📊 Combined Signal:*\n"
-            message += f"Action: *{combined_action}*\n"
+            message += "📊 *Combined Signal:*\n"
+            message += f"Action: {combined_action}\n"
             message += f"Confidence: {combined_confidence.upper()}\n\n"
 
             # Add key pattern details only for strong signals
             if combined_action in ['BUY', 'SELL'] and combined_confidence in ['high', 'very_high']:
                 message += "✅ *Strong Signal Alert*\n"
-                message += "Multiple timeframes are aligned for this trade opportunity.\n\n"
+                message += "Multiple timeframes are aligned for this trade opportunity\n\n"
 
                 # Show only the most relevant pattern for each timeframe
                 for timeframe, signals in combined_signals.items():
@@ -436,20 +453,31 @@ class TelegramBot:
                         display_name = timeframe_names.get(timeframe, timeframe)
                         message += f"{display_name}: {strongest_signal['pattern']} ({strongest_signal['signal']['action']})\n"
             else:
-                message += "⚠️ Weak or conflicting signals across timeframes.\n"
+                message += "⚠️ Weak or conflicting signals across timeframes\n"
         else:
-            message += "No significant patterns detected in any timeframe.\n"
+            message += "No significant patterns detected in any timeframe\n"
 
         # Add current price
         try:
             latest_prices = self.stock_collector.get_latest_prices()
             if ticker in latest_prices and 'short_term' in latest_prices[ticker]:
                 current_price = latest_prices[ticker]['short_term']['price']
-                message += f"\n💰 Current Price: ${current_price:.2f}"
+                # Escape special characters for MarkdownV2
+                message += f"\n💰 Current Price: ${escape_markdown(f'{current_price:.2f}')}"
         except Exception as e:
             logger.error(f"Error getting current price: {e}")
 
-        await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+        print(message)
+        await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
+
+    # Add this helper function to escape Markdown characters
+    def escape_markdown(text):
+        """
+        Helper function to escape MarkdownV2 special characters.
+        Must escape: _ * [ ] ( ) ~ ` > # + - = | { } . !
+        """
+        escape_chars = r'_*[]()~`>#+-=|{}.!'
+        return ''.join(f'\\{c}' if c in escape_chars else c for c in text)
     def _combine_timeframe_signals(self, signals):
         """Combine signals from all timeframes to generate a comprehensive trading decision."""
         combined_strength = 0
@@ -484,7 +512,7 @@ class TelegramBot:
             # Find the action with highest score
             action = max(action_scores, key=action_scores.get)
             if action_scores[action] > 0.5:
-                confidence = 'medium_high'
+                confidence = 'medium-high'
             else:
                 confidence = 'medium'
 
