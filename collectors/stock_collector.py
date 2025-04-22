@@ -5,10 +5,12 @@ import datetime
 import threading
 import talib
 logger = logging.getLogger(__name__)
+pd.set_option('future.no_silent_downcasting', True)
 class MultiStockCollector:
-    def __init__(self):
+    def __init__(self,db_manager):
 
         self.watchlist = set()
+        self.db_manager = db_manager
         self.lock = threading.Lock()
         # Default time intervals for multi-timeframe analysis
         self.timeframes = {
@@ -30,12 +32,25 @@ class MultiStockCollector:
             '1wk': 10080,
             '1mo': 43200  # Approximate
         }
+        if self.db_manager:
+            self._load_watchlist_from_db()
+
+    def _load_watchlist_from_db(self):
+        """Load watchlist from database."""
+        if self.db_manager:
+            db_watchlist = self.db_manager.get_active_watchlist()
+            with self.lock:
+                self.watchlist = set(db_watchlist)
+                logger.info(f"Loaded watchlist from database: {list(self.watchlist)}")
 
     def add_stock(self, ticker_symbol):
-        """Add a stock to the watchlist."""
+        """Add a stock to the watchlist and persist to database."""
         with self.lock:
             if ticker_symbol not in self.watchlist:
                 self.watchlist.add(ticker_symbol)
+                # Also add to database if db_manager is available
+                if self.db_manager:
+                    self.db_manager.add_to_watchlist(ticker_symbol)
                 logger.info(f"Added {ticker_symbol} to watchlist")
                 return True
             else:
@@ -43,10 +58,13 @@ class MultiStockCollector:
                 return False
 
     def remove_stock(self, ticker_symbol):
-        """Remove a stock from the watchlist."""
+        """Remove a stock from the watchlist and update database."""
         with self.lock:
             if ticker_symbol in self.watchlist:
                 self.watchlist.remove(ticker_symbol)
+                # Also remove from database if db_manager is available
+                if self.db_manager:
+                    self.db_manager.remove_from_watchlist(ticker_symbol)
                 logger.info(f"Removed {ticker_symbol} from watchlist")
                 return True
             else:
@@ -69,18 +87,16 @@ class MultiStockCollector:
         try:
             stock = yf.Ticker(ticker_symbol)
 
-            # Use start and end if provided, otherwise use period
             if start and end:
                 data = stock.history(start=start, end=end, interval=interval, prepost=True)
             else:
                 # Determine period based on interval
 
                 if interval == '1h' or interval == '60m':
-                    period = '7d'  # Get 2 months of hourly data
-                elif interval == '15m':
-                    period = '2d'   # Get 7 days of 15-minute data
+                    period = '5d'
                 else:
-                    period = '1d'   # Get 5 days of data for other intervals
+                    period = '1d'
+
 
                 # Fetch data with prepost included to get more complete data
                 data = stock.history(period=period, interval=interval, prepost=True)
@@ -119,13 +135,13 @@ class MultiStockCollector:
         zero_volume_rows = data[data['volume'] == 0]
 
         if not zero_volume_rows.empty:
-            logger.warning(f"Found {len(zero_volume_rows)} rows with zero volume")
+            # logger.warning(f"Found {len(zero_volume_rows)} rows with zero volume")
 
             # For intraday data, try to fill zero volumes with interpolation
-            if interval in ['5m','15m', '30m', '60m', '1h']:
+            if interval in ['2m', '5m','15m', '30m', '60m', '1h']:
                 # First try forward fill, then backward fill for remaining
                 data['volume'] = data['volume'].replace(0, pd.NA)
-                data['volume'] = data['volume'].ffill().bfill()
+                data['volume'] = data['volume'].ffill().bfill().infer_objects(copy=False)
 
                 # If still zeros, use average of nearby non-zero volumes
                 if (data['volume'] == 0).any():
@@ -240,32 +256,6 @@ class MultiStockCollector:
             summaries[ticker] = self.get_summary(ticker)
         return summaries
 
-    def save_to_csv(self, ticker_symbol=None, filename=None):
-        """Save data to CSV file."""
-        if ticker_symbol is None:
-            # Save all stocks data
-            for ticker in self.watchlist:
-                self._save_single_csv(ticker)
-        else:
-            # Save specific stock data
-            self._save_single_csv(ticker_symbol, filename)
-
-    def _save_single_csv(self, ticker_symbol, filename=None):
-        """Helper method to save a single stock's data to CSV."""
-        all_data = self.get_multi_timeframe_data(ticker_symbol)
-
-        for timeframe, data in all_data.items():
-            if filename is None:
-                tf_filename = f"{ticker_symbol}_{timeframe}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            else:
-                tf_filename = f"{filename}_{timeframe}.csv"
-
-            if not data.empty:
-                data.to_csv(tf_filename, index=False)
-                logger.info(f"Data saved to {tf_filename}")
-            else:
-                logger.info(f"No data to save for {ticker_symbol} at {timeframe}")
-
     def get_latest_prices(self):
         """Get the latest price for each stock in watchlist across all timeframes."""
         latest_prices = {}
@@ -277,6 +267,9 @@ class MultiStockCollector:
                     latest_row = data.iloc[-1]
                     ticker_prices[timeframe] = {
                         'datetime': latest_row['datetime'],
+                        'open' : latest_row['open'],
+                        'high' : latest_row['high'],
+                        'low' : latest_row['low'],
                         'price': latest_row['close'],
                         'volume': latest_row['volume']
                     }

@@ -9,22 +9,27 @@ from collectors.stock_collector import MultiStockCollector
 from database.db_manager import DatabaseManager
 from services.bot_service import TelegramBot
 from services.pattern_monitor import TalibPatternMonitor
+from services.sentiment_tracker import SentimentTracker
 from utils.config_loader import ConfigLoader
 
 
 def setup_logging():
     """Setup logging configuration."""
-log_dir = 'logs'
-os.makedirs(log_dir, exist_ok=True)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(os.path.join(log_dir, 'application.log')),
-        logging.StreamHandler()
-    ]
-)
+    log_dir = 'logs'
+    os.makedirs(log_dir, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(os.path.join(log_dir, 'application.log')),
+            logging.StreamHandler()
+        ]
+    )
+
+
 logger = logging.getLogger(__name__)
+
+
 class FinancialMonitorApp:
     def __init__(self):
         # Load configuration
@@ -34,7 +39,7 @@ class FinancialMonitorApp:
         self.db_manager = DatabaseManager(db_config)
 
         # Update stock collector with multi-timeframe capabilities
-        self.stock_collector = MultiStockCollector()
+        self.stock_collector = MultiStockCollector(self.db_manager)
 
         # Set timeframes from config or use defaults
         timeframes = self.config.get('timeframes', {
@@ -45,12 +50,18 @@ class FinancialMonitorApp:
         })
         self.stock_collector.set_timeframes(timeframes)
 
+        # Initialize sentiment tracker
+        self.sentiment_tracker = SentimentTracker(self.db_manager)
+
         telegram_config = self.config.get('telegram', {})
         self.bot = TelegramBot(
             telegram_config,
             self.db_manager,
             self.stock_collector
         )
+
+        # Make sentiment tracker available to the bot
+        self.bot.sentiment_tracker = self.sentiment_tracker
 
         # Now initialize components that use the bot for notifications
         self.news_monitor = NewsMonitor(self.config, self.db_manager, self.bot)
@@ -134,6 +145,17 @@ class FinancialMonitorApp:
         except Exception as e:
             logger.error(f"Error in pattern monitor: {e}")
 
+    def run_sentiment_tracker(self):
+        """Run periodic sentiment updates."""
+        while not self.shutdown_event.is_set():
+            try:
+                self.sentiment_tracker.update_daily_sentiment()
+                logger.info("Sentiment data updated")
+                time.sleep(900)  # Update every 15 minutes
+            except Exception as e:
+                logger.error(f"Error updating sentiment data: {e}")
+                time.sleep(300)  # Wait 5 minutes and try again
+
     async def run(self):
         """Main application runner."""
         try:
@@ -152,6 +174,10 @@ class FinancialMonitorApp:
             # Start pattern monitor in a separate thread
             pattern_thread = threading.Thread(target=self.run_pattern_monitor, daemon=True)
             pattern_thread.start()
+
+            # Start sentiment tracker in a separate thread
+            sentiment_thread = threading.Thread(target=self.run_sentiment_tracker, daemon=True)
+            sentiment_thread.start()
 
             # Create tasks for async components
             news_task = asyncio.create_task(self.news_monitor.monitor())
@@ -194,6 +220,8 @@ class FinancialMonitorApp:
         # Final backup
         self.db_manager.backup_database()
         logger.info("Cleanup completed")
+
+
 def main():
     """Entry point for the application."""
     setup_logging()
@@ -209,5 +237,7 @@ def main():
         traceback.print_exc()
     finally:
         logger.info("Application shutdown complete")
+
+
 if __name__ == "__main__":
     main()

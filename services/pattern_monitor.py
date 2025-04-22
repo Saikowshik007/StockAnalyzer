@@ -1,11 +1,12 @@
-# services/pattern_monitor.py
 import asyncio
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List
 import pandas as pd
 from services.pattern_recognition import TalibPatternRecognition
+
 logger = logging.getLogger(__name__)
+
 class TalibPatternMonitor:
     def __init__(self, config=None, db_manager=None, stock_collector=None, bot_notifier=None):
         """Initialize pattern monitor with optional dependencies."""
@@ -50,8 +51,14 @@ class TalibPatternMonitor:
 
                 watchlist = self.db_manager.get_active_watchlist()
 
-                # Track market conditions for context (placeholder)
-                # market_context = self.get_market_context()
+                # Check market sentiment for context
+                market_sentiment = None
+                if hasattr(self.bot_notifier, 'sentiment_tracker'):
+                    try:
+                        market_sentiment = self.bot_notifier.sentiment_tracker.get_current_sentiment()
+                        logger.info(f"Current market sentiment: {market_sentiment['status']} ({market_sentiment['value']:.1f}/10)")
+                    except Exception as e:
+                        logger.error(f"Error getting market sentiment: {e}")
 
                 # Track notification statistics for adaptive cooldown
                 signals_found = 0
@@ -66,6 +73,10 @@ class TalibPatternMonitor:
                         signals_found += 1
                         if combined_signal['confidence'] in ['high', 'very_high']:
                             high_confidence_signals += 1
+
+                        # Add market sentiment to signal (if available)
+                        if market_sentiment:
+                            combined_signal['market_sentiment'] = market_sentiment
 
                         # Determine if the signal is strong enough to notify
                         if self.should_notify_strong_signal(ticker, combined_signal):
@@ -105,7 +116,17 @@ class TalibPatternMonitor:
                 self.monitoring_interval = new_interval
 
     async def analyze_multiple_timeframes(self, ticker: str) -> Dict:
-        """Enhanced multi-timeframe analysis with smarter integration of indicators."""
+        """Enhanced multi-timeframe analysis with smarter integration of indicators and sentiment."""
+        # Get sentiment data for ticker
+        ticker_sentiment = None
+        if hasattr(self.bot_notifier, 'sentiment_tracker'):
+            try:
+                ticker_sentiment = self.bot_notifier.sentiment_tracker.get_ticker_sentiment(ticker)
+                if ticker_sentiment['status'] != 'No data':
+                    logger.info(f"Ticker {ticker} sentiment: {ticker_sentiment['status']} ({ticker_sentiment['value']:.1f}/10)")
+            except Exception as e:
+                logger.error(f"Error getting ticker sentiment: {e}")
+
         all_timeframe_data = self.stock_collector.get_multi_timeframe_data(ticker)
         signals = {}
         indicators_by_timeframe = {}
@@ -115,10 +136,17 @@ class TalibPatternMonitor:
             if not data.empty:
                 # Get technical indicators first
                 indicators = self.stock_collector.calculate_technical_indicators(data)
+
+                # Add sentiment to indicators if available
+                if ticker_sentiment and ticker_sentiment['status'] != 'No data':
+                    indicators['sentiment'] = ticker_sentiment['value']
+                    indicators['sentiment_article_count'] = ticker_sentiment['article_count']
+                    indicators['sentiment_status'] = ticker_sentiment['status']
+
                 indicators_by_timeframe[timeframe] = indicators
 
                 # Then detect patterns with context from indicators
-                patterns = self.pattern_recognizer.detect_patterns(data,lookback_periods=5)
+                patterns = self.pattern_recognizer.detect_patterns(data, lookback_periods=5)
 
                 if patterns:
                     # Process patterns with indicator context
@@ -131,6 +159,12 @@ class TalibPatternMonitor:
                             'ma_trend': indicators.get('ma_trend', 'neutral'),
                             'macd_hist': indicators.get('macd_hist', 0)
                         }
+
+                        # Add sentiment data to context if available
+                        if ticker_sentiment and ticker_sentiment['status'] != 'No data':
+                            signal['additional_context']['sentiment'] = ticker_sentiment['value']
+                            signal['additional_context']['sentiment_status'] = ticker_sentiment['status']
+
                         signals[timeframe] = signal
 
         # Second pass: adjust signals based on overall context
@@ -138,11 +172,15 @@ class TalibPatternMonitor:
 
         # Combine signals from all timeframes
         if signals:
-            return self.generate_combined_signal(signals)
+            combined_signal = self.generate_combined_signal(signals)
+            # Add ticker sentiment to combined signal for use in notifications
+            if ticker_sentiment and ticker_sentiment['status'] != 'No data':
+                combined_signal['ticker_sentiment'] = ticker_sentiment
+            return combined_signal
         return {}
 
     def _adjust_signals_with_context(self, signals, indicators_by_timeframe):
-        """Adjust signal confidence based on cross-timeframe context."""
+        """Adjust signal confidence based on cross-timeframe context and sentiment."""
         if not signals or len(signals) < 2:
             return
 
@@ -180,6 +218,39 @@ class TalibPatternMonitor:
                         signals['short_term']['confidence'] = 'medium_high'
                     elif signals['short_term']['confidence'] == 'medium_high':
                         signals['short_term']['confidence'] = 'medium'
+
+        # Adjust signals based on sentiment data
+        for timeframe, signal in signals.items():
+            indicators = indicators_by_timeframe.get(timeframe, {})
+            if 'sentiment' in indicators and indicators.get('sentiment_article_count', 0) >= 2:
+                sentiment_value = indicators['sentiment']
+
+                # For buy signals, boost confidence if sentiment is high
+                if signal['action'] == 'BUY' and sentiment_value >= 7.0:
+                    if signal['confidence'] == 'medium':
+                        signal['confidence'] = 'medium_high'
+                    elif signal['confidence'] == 'medium_high':
+                        signal['confidence'] = 'high'
+
+                # For sell signals, boost confidence if sentiment is low
+                elif signal['action'] == 'SELL' and sentiment_value <= 4.0:
+                    if signal['confidence'] == 'medium':
+                        signal['confidence'] = 'medium_high'
+                    elif signal['confidence'] == 'medium_high':
+                        signal['confidence'] = 'high'
+
+                # Reduce confidence for signals that go against sentiment
+                elif signal['action'] == 'BUY' and sentiment_value <= 4.0:
+                    if signal['confidence'] == 'high':
+                        signal['confidence'] = 'medium_high'
+                    elif signal['confidence'] == 'medium_high':
+                        signal['confidence'] = 'medium'
+
+                elif signal['action'] == 'SELL' and sentiment_value >= 7.0:
+                    if signal['confidence'] == 'high':
+                        signal['confidence'] = 'medium_high'
+                    elif signal['confidence'] == 'medium_high':
+                        signal['confidence'] = 'medium'
 
     def evaluate_patterns(self, patterns: Dict, data: pd.DataFrame, indicators: Dict) -> Dict:
         """Evaluate patterns and determine the strongest signal for a timeframe."""
@@ -233,9 +304,36 @@ class TalibPatternMonitor:
         combined_strength = 0
         action_scores = {'BUY': 0, 'SELL': 0, 'HOLD': 0, 'WATCH': 0}
 
+        # Check if we have sentiment data in any timeframe signals
+        has_sentiment = any('additional_context' in s and 'sentiment' in s['additional_context']
+                            for s in signals.values())
+        sentiment_value = None
+
+        if has_sentiment:
+            # Get average sentiment across timeframes
+            sentiment_values = [s['additional_context']['sentiment']
+                                for s in signals.values()
+                                if 'additional_context' in s and 'sentiment' in s['additional_context']]
+            if sentiment_values:
+                sentiment_value = sum(sentiment_values) / len(sentiment_values)
+
         for timeframe, signal in signals.items():
             if signal and signal['action']:
+                # Base timeframe weight
                 weight = self.timeframe_weights.get(timeframe, 0.33)
+
+                # Adjust weight if sentiment aligns with signal
+                if sentiment_value is not None and 'additional_context' in signal:
+                    if (signal['action'] == 'BUY' and sentiment_value >= 7.0) or \
+                            (signal['action'] == 'SELL' and sentiment_value <= 4.0):
+                        # Sentiment strongly aligns with signal, boost weight
+                        weight *= 1.2
+                    elif (signal['action'] == 'BUY' and sentiment_value <= 4.0) or \
+                            (signal['action'] == 'SELL' and sentiment_value >= 7.0):
+                        # Sentiment contradicts signal, reduce weight
+                        weight *= 0.8
+
+                # Get base confidence value
                 confidence_value = self.confidence_thresholds.get(signal['confidence'], 0.5)
 
                 if signal['action'] == 'BUY':
@@ -264,12 +362,35 @@ class TalibPatternMonitor:
             else:
                 confidence = 'medium'
 
+        # Adjust confidence based on sentiment alignment
+        if sentiment_value is not None:
+            if action == 'BUY':
+                if sentiment_value >= 8.0:  # Very positive sentiment
+                    if confidence == 'medium_high':
+                        confidence = 'high'
+                elif sentiment_value <= 3.0:  # Very negative sentiment
+                    if confidence == 'high':
+                        confidence = 'medium_high'
+                    elif confidence == 'medium_high':
+                        confidence = 'medium'
+
+            elif action == 'SELL':
+                if sentiment_value <= 3.0:  # Very negative sentiment
+                    if confidence == 'medium_high':
+                        confidence = 'high'
+                elif sentiment_value >= 8.0:  # Very positive sentiment
+                    if confidence == 'high':
+                        confidence = 'medium_high'
+                    elif confidence == 'medium_high':
+                        confidence = 'medium'
+
         return {
             'action': action,
             'strength': combined_strength,
             'confidence': confidence,
             'timeframe_signals': signals,
-            'action_scores': action_scores
+            'action_scores': action_scores,
+            'sentiment_value': sentiment_value  # Include sentiment value in output
         }
 
     def should_notify(self, ticker: str) -> bool:
@@ -296,8 +417,29 @@ class TalibPatternMonitor:
             # Signals across timeframes conflict significantly
             return False
 
+        # Consider sentiment alignment if available
+        sentiment_aligned = True
+        if 'ticker_sentiment' in signal and signal['ticker_sentiment']['status'] != 'No data':
+            ticker_sentiment = signal['ticker_sentiment']
+            sentiment_value = ticker_sentiment['value']
+            sentiment_article_count = ticker_sentiment['article_count']
+
+            # Only consider sentiment if we have enough articles
+            if sentiment_article_count >= 2:
+                # Check if sentiment strongly contradicts the signal
+                if signal['action'] == 'BUY' and sentiment_value <= 3.0:
+                    # Strong negative sentiment against buy signal
+                    sentiment_aligned = False
+                elif signal['action'] == 'SELL' and sentiment_value >= 8.0:
+                    # Strong positive sentiment against sell signal
+                    sentiment_aligned = False
+
         # Check signal confidence against threshold with adaptive criteria
         if signal['confidence'] in ['high', 'very_high']:
+            # If sentiment strongly disagrees, require higher threshold
+            if not sentiment_aligned and signal['confidence'] != 'very_high':
+                return False
+
             # Check volume confirmation
             if 'short_term' in timeframe_signals and timeframe_signals['short_term'].get('additional_context', {}).get('volume_ratio', 1.0) < 1.2:
                 # Low volume relative to average, reduce signal importance
@@ -311,6 +453,10 @@ class TalibPatternMonitor:
 
         elif signal['confidence'] == 'medium_high' and signal['action'] in ['BUY', 'SELL']:
             # For medium-high confidence, need stronger confirmation
+
+            # If sentiment strongly disagrees, skip notification
+            if not sentiment_aligned:
+                return False
 
             # Check if short and medium timeframes align
             if 'short_term' in timeframe_signals and 'medium_term' in timeframe_signals:
@@ -338,6 +484,15 @@ class TalibPatternMonitor:
                         elif signal['action'] == 'SELL' and context.get('ma_trend') == 'bearish':
                             return self.should_notify(ticker)
 
+                        # Check if sentiment strongly supports the signal
+                        if 'sentiment' in context:
+                            if signal['action'] == 'BUY' and context['sentiment'] >= 8.0:
+                                # Very positive sentiment supports buy signal
+                                return self.should_notify(ticker)
+                            elif signal['action'] == 'SELL' and context['sentiment'] <= 3.0:
+                                # Very negative sentiment supports sell signal
+                                return self.should_notify(ticker)
+
         # More conservative on medium confidence signals
         elif signal['confidence'] == 'medium':
             # Only notify on medium confidence if all timeframes align perfectly
@@ -354,6 +509,15 @@ class TalibPatternMonitor:
                 if context.get('volume_ratio', 1.0) > 2.0:
                     # Very high volume
                     return self.should_notify(ticker)
+
+                # Strong sentiment confirmation
+                if 'sentiment' in context:
+                    if signal['action'] == 'BUY' and context['sentiment'] >= 8.5:
+                        # Extremely positive sentiment
+                        return self.should_notify(ticker)
+                    elif signal['action'] == 'SELL' and context['sentiment'] <= 2.5:
+                        # Extremely negative sentiment
+                        return self.should_notify(ticker)
 
         return False
 
@@ -381,15 +545,30 @@ class TalibPatternMonitor:
         return highest_count / total_signals >= 0.66 if total_signals > 0 else True
 
     def get_market_context(self, ticker: str) -> Dict:
-        """Get overall market context to confirm signals.
-        This is a placeholder for future implementation."""
-        # This could fetch S&P 500 or sector-specific data
-        # to check if the stock's movement aligns with broader market
-        return {
-            'market_trend': 'bullish',  # or bearish, neutral
-            'sector_trend': 'bullish',  # or bearish, neutral
-            'market_volatility': 'low',  # or high, medium
+        """Get overall market context to confirm signals."""
+        context = {
+            'market_trend': 'neutral',
+            'sector_trend': 'neutral',
+            'market_volatility': 'medium',
         }
+
+        # Try to get market sentiment data if available
+        if hasattr(self.bot_notifier, 'sentiment_tracker'):
+            try:
+                market_sentiment = self.bot_notifier.sentiment_tracker.get_current_sentiment()
+                if market_sentiment['status'] != 'No data':
+                    # Translate sentiment to trend
+                    if market_sentiment['value'] >= 7.0:
+                        context['market_trend'] = 'bullish'
+                    elif market_sentiment['value'] <= 4.0:
+                        context['market_trend'] = 'bearish'
+
+                    # Add full sentiment data
+                    context['market_sentiment'] = market_sentiment
+            except Exception as e:
+                logger.error(f"Error getting market sentiment for context: {e}")
+
+        return context
 
     def format_actionable_notification(self, ticker: str, combined_signal: Dict) -> str:
         """Format a highly actionable notification with clear trading plan."""
@@ -432,6 +611,28 @@ class TalibPatternMonitor:
 
                     if short_term_data.get('risk_reward_ratio'):
                         message += f"⚖️ R/R Ratio: 1:{short_term_data['risk_reward_ratio']:.1f}\n"
+
+        # Add sentiment information if available
+        if 'ticker_sentiment' in combined_signal and combined_signal['ticker_sentiment']['status'] != 'No data':
+            ticker_sentiment = combined_signal['ticker_sentiment']
+            sentiment_value = ticker_sentiment['value']
+            sentiment_status = ticker_sentiment['status']
+
+            # Get market sentiment if available
+            market_sentiment_text = ""
+            if 'market_sentiment' in combined_signal:
+                market_sentiment = combined_signal['market_sentiment']
+                market_sentiment_text = f"Market: {market_sentiment['status']} ({market_sentiment['value']:.1f}/10)\n"
+
+            # Determine sentiment alignment with signal
+            sentiment_aligned = (combined_signal['action'] == 'BUY' and sentiment_value >= 6.0) or \
+                                (combined_signal['action'] == 'SELL' and sentiment_value <= 5.0)
+
+            alignment_text = "✅ Aligned with signal" if sentiment_aligned else "⚠️ Conflicts with signal"
+
+            message += f"\n📰 *Sentiment Analysis:*\n"
+            message += f"• {ticker}: {sentiment_status} ({sentiment_value:.1f}/10) {alignment_text}\n"
+            message += market_sentiment_text
 
         # Key reason for the signal
         message += f"\n📝 *Signal Based On:*\n"

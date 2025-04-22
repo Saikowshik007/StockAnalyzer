@@ -2,9 +2,9 @@
 import asyncio
 import logging
 import re
+from datetime import datetime
+from typing import Dict
 
-import pandas as pd
-from pyexpat.errors import messages
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
 from telegram.constants import ParseMode
@@ -20,6 +20,15 @@ class TelegramBot:
         self.stock_collector = stock_collector
         self.application = None
         self.pattern_recognizer = TalibPatternRecognition()
+
+        # Initialize sentiment tracker
+        try:
+            from services.sentiment_tracker import SentimentTracker
+            self.sentiment_tracker = SentimentTracker(self.db_manager)
+            logger.info("Sentiment tracker initialized")
+        except ImportError:
+            logger.warning("SentimentTracker module not available")
+
         # Timeframe configurations
         self.timeframe_weights = {
             'long_term': 0.5,
@@ -39,11 +48,16 @@ class TelegramBot:
     async def send_news_notification(self, news):
         """Send news summary notification to the Telegram chat."""
         try:
-            formatted_message = self._format_news_summary(news)
+            formatted_message,rating = self._format_news_summary(news)
+            if rating in range(3,7):
+                disable_notification = True
+            else:
+                disable_notification= False
             await self.application.bot.send_message(
                 chat_id=self.chat_id,
                 text=formatted_message,
-                parse_mode=ParseMode.MARKDOWN_V2
+                parse_mode=ParseMode.MARKDOWN_V2,
+                disable_notification=disable_notification
             )
         except Exception as e:
             logger.error(f"Error sending news notification: {e}")
@@ -89,7 +103,7 @@ class TelegramBot:
             escaped_url = self._escape_markdown(article_url)
             formatted_message += f"🔗 [Read Full Article]({escaped_url})"
 
-        return formatted_message
+        return (formatted_message,rating)
 
     def _extract_sentiment_category(self, summary):
         """Extract sentiment category from summary."""
@@ -105,6 +119,8 @@ class TelegramBot:
             match = re.search(r'Numerical Rating:\s*(\d+)', summary, re.IGNORECASE)
         if not match:
             match = re.search(r'Sentiment Category:.*?\((\d+)(?:-\d+)?/10\)', summary, re.IGNORECASE)
+
+        # Bug fix: Return default value if match is None
         return match.group(1).strip() if match else "5"
 
     def _extract_reasoning(self, summary):
@@ -172,19 +188,19 @@ class TelegramBot:
         return insights[:3] if insights else ["Actionable insights available in full report"]
 
     def _escape_markdown(self, text):
-        """Escape special characters for Telegram's Markdown V2 format"""
+        """
+        Helper function to properly escape MarkdownV2 special characters.
+        Must escape: _ * [ ] ( ) ~ ` > # + - = | { } . !
+        """
         if not text:
             return ""
 
-        escape_chars = '_*[]()~`>#+-=|{}.!'
-        escaped_text = ""
-        for char in text:
-            if char in escape_chars:
-                escaped_text += f"\\{char}"
-            else:
-                escaped_text += char
+        # Bug fix: Handle numeric types
+        if isinstance(text, (int, float)):
+            text = str(text)
 
-        return escaped_text
+        escape_chars = r'_*[]()~`>#+-=|{}.!'
+        return ''.join(f'\\{c}' if c in escape_chars else c for c in text)
 
     def _format_bullet_list(self, items):
         """Format a list of items as bullet points with proper Markdown escaping"""
@@ -219,6 +235,9 @@ class TelegramBot:
             "/price <ticker> - Get current price (multi-timeframe)\n"
             "/history <ticker> - Get price history\n"
             "/pattern <ticker> - Analyze patterns (multi-timeframe)\n"
+            "/sentiment - View overall market sentiment\n"
+            "/tickersentiment <ticker> - Get sentiment for a specific ticker\n"
+            "/analyze <ticker> - Comprehensive technical + sentiment analysis\n"
             "/latest - Get latest news summaries\n"
             "/stats - Get system statistics\n"
             "/help - Show this help message"
@@ -310,6 +329,9 @@ class TelegramBot:
             display_name = timeframe_names.get(timeframe, timeframe)
             message += f"{display_name}:\n"
             message += f"  Price: ${price_info['price']:.2f}\n"
+            message += f"  Open: {price_info['open']:,}\n"
+            message += f"  High: {price_info['high']:,}\n"
+            message += f"  Low: {price_info['low']:,}\n"
             message += f"  Volume: {price_info['volume']:,}\n"
             message += f"  Time: {price_info['datetime'].strftime('%Y-%m-%d %H:%M')}\n\n"
 
@@ -394,7 +416,7 @@ class TelegramBot:
             if data.empty or timeframe == 'very_short_term':
                 continue
 
-            patterns = self.pattern_recognizer.detect_patterns(data,lookback_periods=3)
+            patterns = self.pattern_recognizer.detect_patterns(data,lookback_periods=5)
 
             if patterns:
                 current_price = data['close'].iloc[-1]
@@ -460,8 +482,8 @@ class TelegramBot:
         # Add current price
         try:
             latest_prices = self.stock_collector.get_latest_prices()
-            if ticker in latest_prices and 'short_term' in latest_prices[ticker]:
-                current_price = latest_prices[ticker]['short_term']['price']
+            if ticker in latest_prices and 'very_short_term' in latest_prices[ticker]:
+                current_price = latest_prices[ticker]['very_short_term']['price']
                 # Escape special characters for MarkdownV2
                 message += f"\n💰 Current Price: ${self.escape_markdown(f'{current_price:.2f}')}"
         except Exception as e:
@@ -584,6 +606,12 @@ class TelegramBot:
             self.application.add_handler(CommandHandler("pattern", self.check_pattern))
             self.application.add_handler(CommandHandler("latest", self.latest_news))
             self.application.add_handler(CommandHandler("stats", self.stats))
+
+            # Add new sentiment-related commands
+            self.application.add_handler(CommandHandler("sentiment", self.sentiment))
+            self.application.add_handler(CommandHandler("tickersentiment", self.ticker_sentiment))
+            self.application.add_handler(CommandHandler("analyze", self.analyze))
+
             self.application.add_handler(CallbackQueryHandler(self.button_callback))
 
             # Initialize the application without running the loop
@@ -610,3 +638,491 @@ class TelegramBot:
             logger.error(f"Error in bot async run: {e}")
             # Re-raise to let the main loop handle it
             raise
+
+
+    async def sentiment(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /sentiment command."""
+        # Check if sentiment tracker exists
+        if not hasattr(self, 'sentiment_tracker'):
+            # Initialize sentiment tracker if not already done
+            try:
+                from services.sentiment_tracker import SentimentTracker
+                self.sentiment_tracker = SentimentTracker(self.db_manager)
+                logger.info("Sentiment tracker initialized")
+            except Exception as e:
+                await update.message.reply_text("Sentiment tracking service is not available.")
+                logger.error(f"Error initializing sentiment tracker: {e}")
+                return
+
+        # Get current sentiment
+        sentiment_data = self.sentiment_tracker.get_current_sentiment()
+
+        # Create sentiment meter visualization
+        message = self._format_sentiment_meter(sentiment_data)
+
+        await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+
+    async def ticker_sentiment(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /tickersentiment <ticker> command."""
+        if not context.args:
+            await update.message.reply_text("Please provide a ticker symbol: /tickersentiment AAPL")
+            return
+
+        ticker = context.args[0].upper()
+
+        # Check if sentiment tracker exists
+        if not hasattr(self, 'sentiment_tracker'):
+            # Initialize sentiment tracker if not already done
+            try:
+                from services.sentiment_tracker import SentimentTracker
+                self.sentiment_tracker = SentimentTracker(self.db_manager)
+                logger.info("Sentiment tracker initialized")
+            except Exception as e:
+                await update.message.reply_text("Sentiment tracking service is not available.")
+                logger.error(f"Error initializing sentiment tracker: {e}")
+                return
+
+        # Get ticker-specific sentiment
+        sentiment_data = self.sentiment_tracker.get_ticker_sentiment(ticker)
+
+        # Create sentiment meter visualization
+        message = self._format_ticker_sentiment_meter(ticker, sentiment_data)
+
+        await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
+
+    async def analyze(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /analyze <ticker> command - combining technical and sentiment analysis."""
+        if not context.args:
+            await update.message.reply_text("Please provide a ticker symbol: /analyze AAPL")
+            return
+
+        ticker = context.args[0].upper()
+
+        message = f"🔍 *Comprehensive Analysis for {ticker}* 🔍\n\n"
+
+        # 1. Get sentiment data
+        if not hasattr(self, 'sentiment_tracker'):
+            try:
+                from services.sentiment_tracker import SentimentTracker
+                self.sentiment_tracker = SentimentTracker(self.db_manager)
+            except Exception as e:
+                logger.error(f"Error initializing sentiment tracker: {e}")
+
+        if hasattr(self, 'sentiment_tracker'):
+            try:
+                ticker_sentiment = self.sentiment_tracker.get_ticker_sentiment(ticker)
+                market_sentiment = self.sentiment_tracker.get_current_sentiment()
+
+                message += "📊 *Sentiment Analysis*\n"
+                message += f"• {ticker} Sentiment: {ticker_sentiment['status']} ({ticker_sentiment['value']:.1f}/10)\n"
+                message += f"• Market Sentiment: {market_sentiment['status']} ({market_sentiment['value']:.1f}/10)\n"
+
+                # Add articles count
+                if ticker_sentiment['article_count'] > 0:
+                    message += f"• Based on {ticker_sentiment['article_count']} articles about {ticker} today\n"
+
+                message += "\n"
+            except Exception as e:
+                logger.error(f"Error getting sentiment data: {e}")
+                message += "📊 *Sentiment Analysis*\n• Error retrieving sentiment data\n\n"
+
+        # 2. Get technical analysis
+        try:
+            # Get multi-timeframe data
+            all_data = self.stock_collector.get_multi_timeframe_data(ticker)
+
+            message += "📈 *Technical Analysis*\n"
+
+            # Get latest price
+            latest_prices = self.stock_collector.get_latest_prices()
+            current_price = None
+            if ticker in latest_prices and 'short_term' in latest_prices[ticker]:
+                current_price = latest_prices[ticker]['short_term']['price']
+                message += f"• Current Price: ${current_price:.2f}\n"
+
+            # Calculate indicators for each timeframe
+            overall_bullish = 0
+            overall_bearish = 0
+            timeframe_names = {
+                'long_term': '📅 Hourly',
+                'medium_term': '🕐 15 minute',
+                'short_term': '⏱️ 5 minute',
+                'very_short_term': '⏱️ 2 minute'
+            }
+
+            for timeframe, data in all_data.items():
+                if data.empty or timeframe == 'very_short_term':
+                    continue
+
+                # Calculate indicators
+                indicators = self.stock_collector.calculate_technical_indicators(data)
+
+                # Detect patterns
+                patterns = self.pattern_recognizer.detect_patterns(data, lookback_periods=5)
+
+                # Determine signal for this timeframe
+                bullish_signals = 0
+                bearish_signals = 0
+
+                # Process indicators
+                if 'rsi' in indicators:
+                    rsi = indicators['rsi']
+                    if isinstance(rsi, (int, float)):
+                        if rsi < 30:
+                            bullish_signals += 1  # Oversold
+                        elif rsi > 70:
+                            bearish_signals += 1  # Overbought
+
+                if 'ma_trend' in indicators:
+                    ma_trend = indicators['ma_trend']
+                    if ma_trend == 'bullish':
+                        bullish_signals += 1
+                    elif ma_trend == 'bearish':
+                        bearish_signals += 1
+
+                # Process patterns
+                pattern_count = sum(len(occurrences) for occurrences in patterns.values())
+
+                # Add to overall count
+                overall_bullish += bullish_signals
+                overall_bearish += bearish_signals
+
+                # Only add timeframe details if significant signals exist
+                if bullish_signals > 0 or bearish_signals > 0 or pattern_count > 0:
+                    tf_display = timeframe_names.get(timeframe, timeframe)
+
+                    # Get the direction for this timeframe
+                    if bullish_signals > bearish_signals:
+                        tf_direction = "🟢 Bullish"
+                    elif bearish_signals > bullish_signals:
+                        tf_direction = "🔴 Bearish"
+                    else:
+                        tf_direction = "⚪ Neutral"
+
+                    message += f"• {tf_display}: {tf_direction}"
+
+                    # Add pattern info if available
+                    if pattern_count > 0:
+                        message += f" ({pattern_count} patterns detected)"
+
+                    message += "\n"
+
+            message += "\n"
+        except Exception as e:
+            logger.error(f"Error in technical analysis: {e}")
+            message += "📈 *Technical Analysis*\n• Error retrieving technical data\n\n"
+
+        # 3. Generate combined trading signal
+        try:
+            message += "🎯 *Combined Trading Signal*\n"
+
+            # Default neutral if no data
+            signal = "NEUTRAL"
+            confidence = "low"
+
+            # If we have both sentiment and technical data
+            have_sentiment = hasattr(self, 'sentiment_tracker')
+            have_technical = overall_bullish > 0 or overall_bearish > 0
+
+            if have_sentiment and have_technical:
+                # Get sentiment values
+                ticker_sentiment_value = ticker_sentiment['value']
+                market_sentiment_value = market_sentiment['value']
+
+                # Calculate weighted sentiment (70% ticker, 30% market)
+                weighted_sentiment = 0.7 * ticker_sentiment_value + 0.3 * market_sentiment_value
+
+                # Determine if sentiment is bullish/bearish/neutral
+                sentiment_signal = "NEUTRAL"
+                if weighted_sentiment >= 7.0:
+                    sentiment_signal = "BULLISH"
+                elif weighted_sentiment <= 4.0:
+                    sentiment_signal = "BEARISH"
+
+                # Determine if technical is bullish/bearish/neutral
+                technical_signal = "NEUTRAL"
+                if overall_bullish > overall_bearish * 1.5:
+                    technical_signal = "BULLISH"
+                elif overall_bearish > overall_bullish * 1.5:
+                    technical_signal = "BEARISH"
+
+                # Combine signals
+                if sentiment_signal == technical_signal:
+                    # Strong signal when they align
+                    signal = sentiment_signal
+                    confidence = "high"
+                elif sentiment_signal != "NEUTRAL" and technical_signal != "NEUTRAL":
+                    # Conflicting signals
+                    signal = "MIXED"
+                    confidence = "low"
+                elif sentiment_signal != "NEUTRAL":
+                    # Sentiment-driven signal
+                    signal = sentiment_signal
+                    confidence = "medium"
+                elif technical_signal != "NEUTRAL":
+                    # Technically-driven signal
+                    signal = technical_signal
+                    confidence = "medium"
+            elif have_sentiment:
+                ticker_sentiment_value = ticker_sentiment['value']
+                # Only sentiment data available
+                if ticker_sentiment_value >= 7.0:
+                    signal = "BULLISH"
+                    confidence = "medium"
+                elif ticker_sentiment_value <= 4.0:
+                    signal = "BEARISH"
+                    confidence = "medium"
+            elif have_technical:
+                # Only technical data available
+                if overall_bullish > overall_bearish * 1.5:
+                    signal = "BULLISH"
+                    confidence = "medium"
+                elif overall_bearish > overall_bullish * 1.5:
+                    signal = "BEARISH"
+                    confidence = "medium"
+
+            # Format confidence
+            confidence_display = "⭐⭐⭐" if confidence == "high" else "⭐⭐" if confidence == "medium" else "⭐"
+
+            # Display signal
+            message += f"• Signal: *{signal}*\n"
+            message += f"• Confidence: {confidence_display}\n\n"
+
+            # Add action recommendations
+            if signal == "BULLISH" and confidence in ["medium", "high"]:
+                message += "💡 *Recommended Action*: Consider buying or increasing long positions.\n"
+
+                # Add stop loss and target recommendations if price available
+                if current_price:
+                    stop_loss = current_price * 0.97  # 3% stop loss
+                    target = current_price * 1.06    # 6% target
+                    message += f"• Entry: ${current_price:.2f}\n"
+                    message += f"• Stop Loss: ${stop_loss:.2f}\n"
+                    message += f"• Target: ${target:.2f}\n"
+                    message += f"• Risk/Reward: 1:2\n"
+
+            elif signal == "BEARISH" and confidence in ["medium", "high"]:
+                message += "💡 *Recommended Action*: Consider reducing exposure or short positions.\n"
+
+                # Add stop loss and target recommendations if price available
+                if current_price:
+                    stop_loss = current_price * 1.03  # 3% stop loss for short
+                    target = current_price * 0.94    # 6% target for short
+                    message += f"• Entry: ${current_price:.2f}\n"
+                    message += f"• Stop Loss: ${stop_loss:.2f}\n"
+                    message += f"• Target: ${target:.2f}\n"
+                    message += f"• Risk/Reward: 1:2\n"
+
+            elif signal == "MIXED":
+                message += "💡 *Recommended Action*: Wait for clearer signals before taking a position.\n"
+                message += "• Monitor for alignment between sentiment and technical indicators.\n"
+
+            else:
+                message += "💡 *Recommended Action*: No clear directional bias. Monitor for new signals.\n"
+
+        except Exception as e:
+            logger.error(f"Error generating combined signal: {e}")
+            message += "🎯 *Combined Trading Signal*\n• Error generating signal\n"
+
+        # Add disclaimer
+        message += "\n⚠️ This is algorithmic analysis and not financial advice. Always do your own research."
+
+        await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+
+    def _format_sentiment_meter(self, sentiment_data: Dict) -> str:
+        """Format sentiment meter for display."""
+        value = sentiment_data['value']
+        status = sentiment_data['status']
+        description = sentiment_data['description']
+        article_count = sentiment_data['article_count']
+
+        # Create meter (10 segments)
+        meter_length = 10
+        filled_segments = min(int(value * meter_length / 10), meter_length)
+
+        # Define meter character based on sentiment
+        if value >= 6.5:  # Positive
+            meter_char = "🟢"
+        elif value >= 5.5:  # Slightly positive
+            meter_char = "🟡"
+        elif value >= 4.5:  # Neutral
+            meter_char = "⚪"
+        elif value >= 3.5:  # Slightly negative
+            meter_char = "🟠"
+        else:  # Negative
+            meter_char = "🔴"
+
+        meter = meter_char * filled_segments + "⚫" * (meter_length - filled_segments)
+
+        # Create time-based trend indicator if available
+        trend_chart = ""
+        if all(sentiment_data.get(x) is not None for x in ['morning_sentiment', 'midday_sentiment', 'afternoon_sentiment']):
+            morning = sentiment_data['morning_sentiment']
+            midday = sentiment_data['midday_sentiment']
+            afternoon = sentiment_data['afternoon_sentiment']
+
+            trend_chart = "\n\n*Intraday Trend:*\n"
+            trend_chart += f"Morning: {self._sentiment_to_emoji(morning)} ({morning:.1f}/10)\n"
+            trend_chart += f"Midday: {self._sentiment_to_emoji(midday)} ({midday:.1f}/10)\n"
+            trend_chart += f"Afternoon: {self._sentiment_to_emoji(afternoon)} ({afternoon:.1f}/10)"
+
+        # Add affected tickers if available
+        tickers_info = ""
+        if sentiment_data.get('affected_tickers'):
+            tickers = sentiment_data['affected_tickers'].split(',')
+            if tickers:
+                tickers_info = "\n\n*Top Mentioned Tickers:*\n"
+                tickers_info += ", ".join(tickers)
+
+        message = (
+            f"📊 *Market Sentiment Meter* 📊\n\n"
+            f"Status: *{status}*\n"
+            f"Value: *{value:.1f}/10*\n"
+            f"Articles: {article_count}\n\n"
+            f"{meter}\n\n"
+            f"{description}{trend_chart}{tickers_info}\n\n"
+            f"_Updated: {datetime.now().strftime('%H:%M:%S')}_"
+        )
+
+        return message
+
+    def _format_ticker_sentiment_meter(self, ticker: str, sentiment_data: Dict) -> str:
+        """Format ticker-specific sentiment meter."""
+        value = sentiment_data['value']
+        status = sentiment_data['status']
+        description = sentiment_data['description']
+        article_count = sentiment_data['article_count']
+
+        # Create meter (10 segments)
+        meter_length = 10
+        filled_segments = min(int(value * meter_length / 10), meter_length)
+
+        # Define meter character based on sentiment
+        if value >= 6.5:  # Positive
+            meter_char = "🟢"
+        elif value >= 5.5:  # Slightly positive
+            meter_char = "🟡"
+        elif value >= 4.5:  # Neutral
+            meter_char = "⚪"
+        elif value >= 3.5:  # Slightly negative
+            meter_char = "🟠"
+        else:  # Negative
+            meter_char = "🔴"
+
+        meter = meter_char * filled_segments + "⚫" * (meter_length - filled_segments)
+
+        # Add trading signals advice
+        trading_advice = self._generate_sentiment_trading_advice(ticker, value)
+
+        # Escape special characters for Markdown V2
+        ticker_escaped = self._escape_markdown(ticker)
+        status_escaped = self._escape_markdown(status)
+        value_escaped = self._escape_markdown(f"{value:.1f}")
+        article_count_escaped = self._escape_markdown(str(article_count))
+        description_escaped = self._escape_markdown(description)
+        trading_advice_escaped = self._escape_markdown(trading_advice)
+
+        message = (
+            f"📈 *{ticker_escaped} Sentiment Meter* 📈\n\n"
+            f"Status: *{status_escaped}*\n"
+            f"Value: *{value_escaped}/10*\n"
+            f"Articles: {article_count_escaped}\n\n"
+            f"{meter}\n\n"
+            f"{description_escaped}\n\n"
+            f"{trading_advice_escaped}\n\n"
+            f"_Updated: {datetime.now().strftime('%H:%M:%S')}_"
+        )
+
+        return message
+
+    def _sentiment_to_emoji(self, value: float) -> str:
+        """Convert sentiment value to appropriate emoji."""
+        if value >= 8.0:
+            return "🟢🟢"  # Very Positive
+        elif value >= 7.0:
+            return "🟢"  # Positive
+        elif value >= 6.0:
+            return "🟡"  # Slightly Positive
+        elif value >= 5.0:
+            return "⚪"  # Neutral
+        elif value >= 4.0:
+            return "🟠"  # Slightly Negative
+        elif value >= 3.0:
+            return "🔴"  # Negative
+        else:
+            return "🔴🔴"  # Very Negative
+
+    def _generate_sentiment_trading_advice(self, ticker: str, sentiment_value: float) -> str:
+        """Generate trading advice based on sentiment."""
+        # Get current technical signals for ticker
+        technical_summary = None
+        try:
+            technical_summary = self.stock_collector.get_summary(ticker)
+        except Exception as e:
+            logger.error(f"Error getting technical summary: {e}")
+
+        # No technical data available
+        if not technical_summary or 'timeframes' not in technical_summary:
+            # Pure sentiment-based advice
+            if sentiment_value >= 8.0:
+                return "💡 Trading Signal: Strong bullish sentiment indicates potential buying opportunity."
+            elif sentiment_value >= 6.5:
+                return "💡 Trading Signal: Positive sentiment suggests considering long positions with proper risk management."
+            elif sentiment_value <= 3.0:
+                return "💡 Trading Signal: Strong bearish sentiment indicates caution or potential shorting opportunity."
+            elif sentiment_value <= 4.5:
+                return "💡 Trading Signal: Negative sentiment suggests reducing exposure or considering short positions."
+            else:
+                return "💡 Trading Signal: Neutral sentiment suggests waiting for clearer directional signals."
+
+        # We have both sentiment and technical data - combine them
+        technical_bullish = 0
+        technical_bearish = 0
+
+        # Count bullish/bearish signals from technical indicators
+        for timeframe, tf_data in technical_summary['timeframes'].items():
+            if 'indicators' in tf_data:
+                indicators = tf_data['indicators']
+
+                # RSI
+                if 'rsi' in indicators:
+                    rsi = indicators['rsi']
+                    if isinstance(rsi, (int, float)):
+                        if rsi < 30:
+                            technical_bullish += 1  # Oversold
+                        elif rsi > 70:
+                            technical_bearish += 1  # Overbought
+
+                # MA Trend
+                if 'ma_trend' in indicators:
+                    ma_trend = indicators['ma_trend']
+                    if ma_trend == 'bullish':
+                        technical_bullish += 1
+                    elif ma_trend == 'bearish':
+                        technical_bearish += 1
+
+        # Combine technical and sentiment signals
+        is_technical_bullish = technical_bullish > technical_bearish
+        is_technical_bearish = technical_bearish > technical_bullish
+        is_sentiment_bullish = sentiment_value >= 6.5
+        is_sentiment_bearish = sentiment_value <= 4.5
+
+        # Strong signal when technical and sentiment align
+        if is_technical_bullish and is_sentiment_bullish:
+            return "💡 Trading Signal: Strong buy - bullish technical indicators with positive sentiment."
+        elif is_technical_bearish and is_sentiment_bearish:
+            return "💡 Trading Signal: Strong sell - bearish technical indicators with negative sentiment."
+
+        # Mixed signals
+        if is_technical_bullish and is_sentiment_bearish:
+            return "💡 Trading Signal: Mixed signals - bullish technicals but bearish sentiment. Consider waiting for alignment."
+        elif is_technical_bearish and is_sentiment_bullish:
+            return "💡 Trading Signal: Mixed signals - bearish technicals but bullish sentiment. Monitor for trend change."
+
+        # Weak signals
+        if is_sentiment_bullish:
+            return "💡 Trading Signal: Moderately bullish - positive sentiment with neutral technical indicators."
+        elif is_sentiment_bearish:
+            return "💡 Trading Signal: Moderately bearish - negative sentiment with neutral technical indicators."
+
+        return "💡 Trading Signal: Neutral - no clear directional bias from either sentiment or technical indicators."

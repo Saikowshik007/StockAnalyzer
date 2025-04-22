@@ -19,7 +19,6 @@ news_collector:
     - "cnbc"
     - "yahoo_finance"
   skip_domains:
-    - "investors.com"
     - "wsj.com"
     - "bloomberg.com"
     - "investing.com"

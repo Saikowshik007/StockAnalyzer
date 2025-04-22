@@ -62,3 +62,27 @@ class WatchlistItem(Base):
     ticker = Column(String, unique=True, nullable=False)
     added_at = Column(DateTime, default=datetime.now)
     active = Column(Boolean, default=True)
+
+class DailySentiment(Base):
+    __tablename__ = 'daily_sentiment'
+
+    id = Column(Integer, primary_key=True)
+    date = Column(DateTime, nullable=False)
+    average_sentiment = Column(Float, nullable=False, default=5.0)
+    article_count = Column(Integer, default=0)
+    min_sentiment = Column(Float)
+    max_sentiment = Column(Float)
+
+    # Time-based sentiment tracking
+    morning_sentiment = Column(Float)  # Pre-market to 11am
+    midday_sentiment = Column(Float)  # 11am to 1pm
+    afternoon_sentiment = Column(Float)  # 1pm to market close
+
+    # Industry sentiment tracking (optional extension)
+    tech_sentiment = Column(Float)
+    finance_sentiment = Column(Float)
+    healthcare_sentiment = Column(Float)
+    energy_sentiment = Column(Float)
+
+    # Related tickers with significant news impact
+    affected_tickers = Column(String)

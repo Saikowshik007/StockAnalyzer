@@ -94,7 +94,7 @@ class TalibPatternRecognition:
 
         # Get only the recent data based on lookback_periods
         # Make sure we have enough data for TA-Lib functions
-        min_periods = max(lookback_periods, 30)  # Some patterns need more historical data
+        min_periods = max(lookback_periods, 5)  # Some patterns need more historical data
         if len(data) > min_periods:
             # Keep more data for calculation but focus on recent periods for detection
             recent_data = data.tail(min_periods).copy()
