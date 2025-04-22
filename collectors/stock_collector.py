@@ -5,7 +5,6 @@ import datetime
 import threading
 import talib
 logger = logging.getLogger(__name__)
-pd.set_option('future.no_silent_downcasting', True)
 class MultiStockCollector:
     def __init__(self,db_manager):
 
