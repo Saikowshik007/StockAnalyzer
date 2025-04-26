@@ -8,6 +8,6 @@ peft
 protobuf
 sentencepiece
 python-telegram-bot~=22.0
-torch~=2.8.0.dev20250412+cu128
+torch
 telegram~=0.0.1
 numpy~=1.26.4
