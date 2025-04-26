@@ -1,5 +1,6 @@
 docker build -t financial-news-monitor .
-
+docker stop financial-monitor
+docker rm financial-monitor
 docker run -d --name financial-monitor \
   --env-file .env \
   -v ./database:/app/database \
