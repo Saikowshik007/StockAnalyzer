@@ -9,6 +9,20 @@ class AnalysisService:
 
     def extract_components(self, summary: str) -> Dict:
         """Extract structured components from summary text."""
+        # Default values for non-financial content
+        components = {
+            'sentiment_category': "Neutral",
+            'sentiment_rating': 5.0,
+            'reasoning': "",
+            'market_implications': [],
+            'actionable_insights': []
+        }
+
+        # If it's marked as non-financial, return defaults
+        if summary.strip().startswith("NOT_FINANCIAL_NEWS"):
+            return components
+
+        # Otherwise extract components as usual
         components = {
             'sentiment_category': self._extract_sentiment_category(summary),
             'sentiment_rating': float(self._extract_rating(summary)),

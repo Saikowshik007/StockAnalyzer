@@ -88,7 +88,15 @@ class NewsMonitor:
             try:
                 logger.info(f"New article: {item.article.title}")
 
+                # Generate summary which will now include relevance check
                 summary = self.summarizer.generate_summary(item.article)
+
+                # Check if the AI determined this isn't financial news
+                if summary.strip().startswith("NOT_FINANCIAL_NEWS"):
+                    logger.info(f"Skipping non-financial article: {item.article.title}")
+                    continue
+
+                # Set the summary for the news item
                 item.set_summary(summary)
 
                 # Extract components for database storage
