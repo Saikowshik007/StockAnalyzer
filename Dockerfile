@@ -15,25 +15,38 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libffi-dev \
     libnss3 \
     libnspr4 \
+    build-essential \
+    wget \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Create directories for data persistence
 RUN mkdir -p /app/logs /app/database /app/backups
 
-# Create a non-root user and set permissions
-RUN useradd -m -u 1000 appuser && \
-    chown -R appuser:appuser /app
+# TA-Lib setup - Install from source since we're in Linux, not Windows
+RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
+    tar -xvzf ta-lib-0.4.0-src.tar.gz && \
+    cd ta-lib/ && \
+    ./configure --prefix=/usr && \
+    make && \
+    make install && \
+    cd .. && \
+    rm -rf ta-lib ta-lib-0.4.0-src.tar.gz
 
 # Copy requirements file
 COPY requirements.txt .
 
 # Install Python dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir TA-Lib
 
 # Install NLTK data
 RUN python -m nltk.downloader punkt
+
+# Create a non-root user and set permissions
+RUN useradd -m -u 1000 appuser && \
+    chown -R appuser:appuser /app
 
 # Copy application code
 COPY . .
