@@ -11,3 +11,4 @@ python-telegram-bot~=22.0
 torch
 telegram~=0.0.1
 numpy~=1.26.4
+openai
