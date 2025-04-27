@@ -24,14 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN mkdir -p /app/logs /app/database /app/backups
 
 # TA-Lib setup - Install from source since we're in Linux, not Windows
-RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
-    tar -xvzf ta-lib-0.4.0-src.tar.gz && \
-    cd ta-lib/ && \
-    ./configure --prefix=/usr && \
-    make && \
-    make install && \
-    cd .. && \
-    rm -rf ta-lib ta-lib-0.4.0-src.tar.gz
+RUN pip install TA-Lib-Precompiled
 
 # Copy requirements file
 COPY requirements.txt .
