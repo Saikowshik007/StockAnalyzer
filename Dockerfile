@@ -6,7 +6,8 @@ WORKDIR /app
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONFAULTHANDLER=1
+    PYTHONFAULTHANDLER=1 \
+    LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -27,11 +28,12 @@ RUN mkdir -p /app/logs /app/database /app/backups
 RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
     tar -xzf ta-lib-0.4.0-src.tar.gz && \
     cd ta-lib/ && \
-    ./configure --prefix=/usr && \
+    ./configure && \
     make && \
     make install && \
     cd .. && \
-    rm -rf ta-lib ta-lib-0.4.0-src.tar.gz
+    rm -rf ta-lib ta-lib-0.4.0-src.tar.gz && \
+    ldconfig
 
 # Copy requirements file
 COPY requirements.txt .
@@ -39,8 +41,8 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir numpy && \
-    pip install --no-cache-dir ta-lib && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir ta-lib
 
 # Create a non-root user and set permissions
 RUN useradd -m -u 1000 appuser && \
