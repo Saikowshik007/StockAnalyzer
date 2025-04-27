@@ -453,24 +453,15 @@ class YahooMultiStockCollector:
             return
 
         try:
-            # Create a list of tickers to subscribe to
+            # Get list of tickers to subscribe to
             tickers = list(self.watchlist)
-            if "SPY" not in tickers:  # Add SPY if not already in watchlist
-                tickers.append("SPY")
 
-            # Create properly formatted subscription strings
-            subscriptions = [f"ticker/{ticker}" for ticker in tickers]
-
-            # Send subscription message
+            # Create simple subscription message - no need for "ticker/" prefix
             subscribe_msg = {
-                "subscribe": subscriptions,
-                "socket_id": self.socket_id
+                "subscribe": tickers
             }
 
-            if self.crumb:
-                subscribe_msg["crumb"] = self.crumb
-
-            logger.info(f"Subscribing to {len(subscriptions)} ticker channels")
+            logger.info(f"Subscribing to {len(tickers)} ticker channels")
             self.ws.send(json.dumps(subscribe_msg))
 
         except Exception as e:
@@ -489,12 +480,8 @@ class YahooMultiStockCollector:
                 # Subscribe to the new ticker if websocket is connected
                 if self.ws_connected:
                     subscribe_msg = {
-                        "subscribe": [f"ticker/{ticker_symbol}"],
-                        "socket_id": self.socket_id
+                        "subscribe": [ticker_symbol]
                     }
-
-                    if self.crumb:
-                        subscribe_msg["crumb"] = self.crumb
 
                     self.ws.send(json.dumps(subscribe_msg))
 
