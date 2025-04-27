@@ -14,7 +14,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Create directories for data persistence
-RUN mkdir -p /app/logs /app/database /app/backups
+RUN mkdir -p /app/logs /app/database /app/backups && \
+    touch /app/logs/application.log && \
+    chown -R appuser:appuser /app && \
+    chmod -R 755 /app && \
+    chmod 777 /app/logs/application.log
 
 # Install TA-Lib using the .deb package
 RUN wget https://github.com/TA-Lib/ta-lib/releases/download/v0.6.4/ta-lib_0.6.4_amd64.deb && \
@@ -39,10 +43,6 @@ RUN useradd -m -u 1000 appuser
 # Copy application code
 COPY . .
 
-# Set correct ownership and permissions
-RUN chown -R appuser:appuser /app && \
-    chmod -R 755 /app && \
-    chmod -R 777 /app/logs /app/database /app/backups
 
 # Switch to non-root user
 USER appuser
