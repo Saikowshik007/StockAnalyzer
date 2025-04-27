@@ -5,7 +5,7 @@ import threading
 import time
 
 from collectors.news_collector import NewsMonitor
-from collectors.stock_collector import MultiStockCollector
+from collectors.stock_collector import YahooMultiStockCollector
 from database.db_manager import DatabaseManager
 from services.bot_service import TelegramBot
 from services.pattern_monitor import TalibPatternMonitor
@@ -38,8 +38,8 @@ class FinancialMonitorApp:
         db_config = self.config.get('database', {})
         self.db_manager = DatabaseManager(db_config)
 
-        # Update stock collector with multi-timeframe capabilities
-        self.stock_collector = MultiStockCollector(self.db_manager)
+        # Update stock collector to use Yahoo Finance (no API key needed)
+        self.stock_collector = YahooMultiStockCollector(self.db_manager)
 
         # Set timeframes from config or use defaults
         timeframes = self.config.get('timeframes', {
@@ -92,7 +92,8 @@ class FinancialMonitorApp:
     def run_stock_collector(self):
         """Run the stock collector."""
         try:
-            self.stock_collector.start()
+            # Connect to Yahoo WebSocket
+            self.stock_collector.connect_websocket()
         except Exception as e:
             logger.error(f"Error running stock collector: {e}")
 
@@ -167,9 +168,13 @@ class FinancialMonitorApp:
             # Start backup manager
             self.db_manager.backup_database()
 
+            # Connect to Yahoo WebSocket first
+            self.run_stock_collector()
+            logger.info("Yahoo Finance WebSocket connection initialized")
+
             # Start stock data saver in a separate thread
-            # saver_thread = threading.Thread(target=self.run_stock_data_saver, daemon=True)
-            # saver_thread.start()
+            saver_thread = threading.Thread(target=self.run_stock_data_saver, daemon=True)
+            saver_thread.start()
 
             # Start pattern monitor in a separate thread
             pattern_thread = threading.Thread(target=self.run_pattern_monitor, daemon=True)
@@ -204,6 +209,10 @@ class FinancialMonitorApp:
         self.shutdown_event.set()
         self.news_monitor.stop()
 
+        # Close Yahoo WebSocket connection
+        if hasattr(self, 'stock_collector'):
+            self.stock_collector.close()
+            logger.info("Yahoo Finance WebSocket connection closed")
 
         # Cancel all running tasks
         for task in self.tasks:

@@ -51,6 +51,9 @@ class TalibPatternMonitor:
 
                 watchlist = self.db_manager.get_active_watchlist()
 
+                # Refresh data for the watchlist to ensure fresh data from Yahoo
+                self.stock_collector.refresh_data()
+
                 # Check market sentiment for context
                 market_sentiment = None
                 if hasattr(self.bot_notifier, 'sentiment_tracker'):
