@@ -30,8 +30,8 @@ COPY requirements.txt .
 # Install Python dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir numpy && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir ta-lib
+    pip install --no-cache-dir ta-lib && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Create a non-root user and set permissions
 RUN useradd -m -u 1000 appuser && \
