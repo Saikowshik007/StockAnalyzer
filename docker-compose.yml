@@ -1,0 +1,17 @@
+version: '3'
+services:
+  financial-monitor:
+    build: .
+    container_name: financial-monitor
+    environment:
+      - TELEGRAM_API_KEY
+      - OPENAI_API_KEY
+    volumes:
+      - ./database:/home/appuser/app/database
+      - ./logs:/home/appuser/app/logs
+      - ./backups:/home/appuser/app/backups
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'
