@@ -6,8 +6,7 @@ WORKDIR /app
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONFAULTHANDLER=1 \
-    LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+    PYTHONFAULTHANDLER=1
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -24,7 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create directories for data persistence
 RUN mkdir -p /app/logs /app/database /app/backups
 
-# Install TA-Lib from source
+# Install TA-Lib from source with explicit library path
 RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
     tar -xzf ta-lib-0.4.0-src.tar.gz && \
     cd ta-lib/ && \
@@ -32,17 +31,24 @@ RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
     make && \
     make install && \
     cd .. && \
-    rm -rf ta-lib ta-lib-0.4.0-src.tar.gz && \
+    rm -rf ta-lib ta-lib-0.4.0-src.tar.gz
+
+# Ensure the libraries are in the correct place and update cache
+RUN ln -s /usr/local/lib/libta_lib.so.0 /usr/lib/ && \
+    ln -s /usr/local/lib/libta_lib.so.0.0.0 /usr/lib/ && \
+    ln -s /usr/local/lib/libta_lib.so /usr/lib/ && \
     ldconfig
 
 # Copy requirements file
 COPY requirements.txt .
 
-# Install Python dependencies
+# Install Python dependencies (install TA-Lib separately)
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir numpy && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir ta-lib
+    pip install --no-cache-dir -r requirements.txt
+
+# Install TA-Lib Python wrapper
+RUN pip install --global-option=build_ext --global-option="-L/usr/local/lib/" --global-option="-I/usr/local/include" ta-lib
 
 # Create a non-root user and set permissions
 RUN useradd -m -u 1000 appuser && \
