@@ -15,4 +15,4 @@ openai
 yfinance
 sqlalchemy
 hf_xet
-websocket
+websocket-client
