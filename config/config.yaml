@@ -1,19 +1,18 @@
-
 telegram:
   api_key: ${TELEGRAM_API_KEY}
   chat_id: "-4606618937"
 openai:
   api_key: ${OPENAI_API_KEY}
-  database:
+database:
   type: "sqlite"
-  name: "/app/database/financial_monitor.db"
+  name: "database/financial_monitor.db"
   backup_enabled: true
-  backup_path: "/app/backups"
+  backup_path: "backups"
 news_collector:
   interval_seconds: 30
   business_hours:
-  start: 8
-  end: 15
+    start: 8
+    end: 15
   sources:
     - "benzinga"
     - "cnbc"
@@ -32,7 +31,7 @@ timeframes:
   short_term:
     interval: "5m"
   very_short_term:
-    interval : "2m"
+    interval: "2m"
 pattern_monitor:
   interval_seconds: 300  # 5 minutes
   notification_cooldown: 1800  # 1 hour
@@ -79,4 +78,4 @@ summarizer:
 logging:
   level: "INFO"
   format: "%(asctime)s - %(levelname)s - %(message)s"
-  file: "/app/logs/application.log"
+  file: "logs/application.log"
