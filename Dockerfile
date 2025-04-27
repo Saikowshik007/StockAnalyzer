@@ -28,10 +28,10 @@ RUN wget https://github.com/TA-Lib/ta-lib/releases/download/v0.6.4/ta-lib_0.6.4_
 COPY requirements.txt .
 
 # Install Python dependencies
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir numpy && \
-    pip install --no-cache-dir ta-lib && \
-    pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip && \
+    pip install numpy && \
+    pip install ta-lib && \
+    pip install -r requirements.txt
 
 # Create a non-root user and set permissions
 RUN useradd -m -u 1000 appuser && \
