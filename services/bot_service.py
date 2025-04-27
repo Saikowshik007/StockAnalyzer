@@ -461,21 +461,20 @@ class TelegramBot:
             message += f"Action: {combined_action}\n"
             message += f"Confidence: {self.escape_markdown(combined_confidence.upper())}\n\n"
 
-            # Add key pattern details only for strong signals
-            if combined_action in ['BUY', 'SELL'] and combined_confidence in ['high', 'very_high']:
-                message += "✅ *Strong Signal Alert*\n"
-                message += "Multiple timeframes are aligned for this trade opportunity\n\n"
+            # Less strict conditions for showing strong signal
+            if combined_action in ['BUY', 'SELL']:
+                message += "✅ *Trading Signal Detected*\n"
 
-                # Show only the most relevant pattern for each timeframe
+                # Show the patterns found across timeframes
                 for timeframe, signals in combined_signals.items():
                     if signals:
-                        # Get the strongest signal
-                        strongest_signal = max(signals, key=lambda x: self.confidence_thresholds.get(x['signal']['confidence'], 0))
-
                         display_name = timeframe_names.get(timeframe, timeframe)
-                        message += f"{display_name}: {strongest_signal['pattern']} ({strongest_signal['signal']['action']})\n"
+                        for signal_data in signals[:1]:  # Show just the first pattern for each timeframe
+                            pattern = signal_data.get('pattern', 'Unknown pattern')
+                            action = signal_data.get('signal', {}).get('action', 'UNKNOWN')
+                            message += f"{display_name}: {pattern} ({action})\n"
             else:
-                message += "⚠️ Weak or conflicting signals across timeframes\n"
+                message += "⚠️ No clear directional signal at this time\n"
         else:
             message += "No significant patterns detected in any timeframe\n"
 
@@ -523,16 +522,16 @@ class TelegramBot:
                         action_scores['WATCH'] += weight * confidence_value
 
         # Determine final action
-        if combined_strength > 0.6:
+        if combined_strength > 0.4:  # Changed from 0.6
             action = 'BUY'
             confidence = 'high'
-        elif combined_strength < -0.6:
+        elif combined_strength < -0.4:  # Changed from -0.6
             action = 'SELL'
             confidence = 'high'
         else:
             # Find the action with highest score
             action = max(action_scores, key=action_scores.get)
-            if action_scores[action] > 0.5:
+            if action_scores[action] > 0.3:  # Changed from 0.5
                 confidence = 'medium-high'
             else:
                 confidence = 'medium'

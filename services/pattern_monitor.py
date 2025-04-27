@@ -533,16 +533,17 @@ class TalibPatternMonitor:
                 action = signal['action']
                 actions[action] = actions.get(action, 0) + 1
 
-        # Check if we have conflicting signals (Buy vs Sell)
+        # Check if we have directly conflicting BUY vs SELL signals
         if 'BUY' in actions and 'SELL' in actions:
-            return False  # Direct conflict
+            # Only consider it a conflict if both are significant
+            if actions['BUY'] > 1 and actions['SELL'] > 1:
+                return False
 
-        # Check if majority of timeframes agree
+        # Lower the threshold - if more than 50% agree (was 66%)
         total_signals = sum(actions.values())
         highest_count = max(actions.values()) if actions else 0
 
-        # If more than 66% of signals agree, consider it aligned
-        return highest_count / total_signals >= 0.66 if total_signals > 0 else True
+        return highest_count / total_signals >= 0.5 if total_signals > 0 else True
 
     def get_market_context(self, ticker: str) -> Dict:
         """Get overall market context to confirm signals."""

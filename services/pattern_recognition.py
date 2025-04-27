@@ -277,23 +277,21 @@ class TalibPatternRecognition:
 
         # Base confidence from signal strength
         if abs_signal >= 100:
-            base_confidence = 0.8
+            base_confidence = 0.9  # Was 0.8
         elif abs_signal >= 50:
-            base_confidence = 0.6
+            base_confidence = 0.7  # Was 0.6
         else:
-            base_confidence = 0.4
+            base_confidence = 0.5  # Was 0.4
 
-        # Adjust for pattern priority
-        priority_multiplier = 1.2 - (pattern_priority - 1) * 0.1  # Range: 1.2 to 0.7
+        # Adjust for pattern priority with less penalty
+        priority_multiplier = 1.3 - (pattern_priority - 1) * 0.08  # Modified formula
         base_confidence *= priority_multiplier
 
         # Adjust for volume
         if volume_ratio > 1.5:
-            base_confidence *= 1.2
+            base_confidence *= 1.3  # Was 1.2
         elif volume_ratio > 1.0:
-            base_confidence *= 1.1
-        elif volume_ratio < 0.8:
-            base_confidence *= 0.9
+            base_confidence *= 1.2  # Was 1.1
 
         # Adjust for additional indicators if provided
         if additional_indicators:
@@ -301,13 +299,13 @@ class TalibPatternRecognition:
             base_confidence *= indicator_score
 
         # Convert to confidence level
-        if base_confidence > 0.85:
+        if base_confidence > 0.75:  # Was 0.85
             return 'very_high'
-        elif base_confidence > 0.7:
+        elif base_confidence > 0.6:  # Was 0.7
             return 'high'
-        elif base_confidence > 0.55:
+        elif base_confidence > 0.45:  # Was 0.55
             return 'medium_high'
-        elif base_confidence > 0.4:
+        elif base_confidence > 0.3:  # Was 0.4
             return 'medium'
         else:
             return 'low'
