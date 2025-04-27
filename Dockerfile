@@ -23,18 +23,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Create directories for data persistence
 RUN mkdir -p /app/logs /app/database /app/backups
 
-# TA-Lib setup - Install from source since we're in Linux, not Windows
-RUN pip install TA-Lib-Precompiled
+# Install TA-Lib from source
+RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz && \
+    tar -xzf ta-lib-0.4.0-src.tar.gz && \
+    cd ta-lib/ && \
+    ./configure --prefix=/usr && \
+    make && \
+    make install && \
+    cd .. && \
+    rm -rf ta-lib ta-lib-0.4.0-src.tar.gz
 
 # Copy requirements file
 COPY requirements.txt .
 
 # Install Python dependencies
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt && \
-
-# Install NLTK data
-RUN python -m nltk.downloader punkt
+    pip install --no-cache-dir numpy && \
+    pip install --no-cache-dir ta-lib && \
+    pip install --no-cache-dir -r requirements.txt
 
 # Create a non-root user and set permissions
 RUN useradd -m -u 1000 appuser && \
