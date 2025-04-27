@@ -2,7 +2,7 @@ docker build -t financial-news-monitor .
 docker stop financial-monitor
 docker rm financial-monitor
 docker run -d --name financial-monitor \
- -e TELEGRAM_API_KEY -e OPENAI_API_KEY \
+  --env-file ~/Desktop/env_files/.env \
   -v ./database:/app/database \
   -v ./logs:/app/logs \
   -v ./backups:/app/backups \
