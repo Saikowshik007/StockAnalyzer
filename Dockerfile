@@ -1,29 +1,39 @@
-FROM python:3.10
+FROM python:3.10-slim
 
-# Set working directory initially
-WORKDIR /
+# Set working directory
+WORKDIR /app
 
-# Install build dependencies
-RUN apt-get update && apt-get install -y build-essential wget
+# Create directories for data persistence
+RUN mkdir -p /app/logs /app/database /app/backups
 
-# Download and install TA-Lib
-RUN wget https://github.com/TA-Lib/ta-lib/releases/download/v0.4.0/ta-lib-0.4.0-src.tar.gz && \
-    tar -xvf ta-lib-0.4.0-src.tar.gz && \
-    cd ta-lib && \
-    ./configure --prefix=/usr --build=`/bin/arch`-unknown-linux-gnu && \
-    make && \
-    make install && \
-    cd .. && \
-    rm -rf ta-lib-0.4.0-src.tar.gz ta-lib
+RUN wget https://github.com/TA-Lib/ta-lib/releases/download/v0.4.0/ta-lib-0.4.0-src.tar.gz
+RUN tar -xvf ta-lib-0.4.0-src.tar.gz
+WORKDIR /ta-lib
+RUN ./configure --prefix=/usr --build=`/bin/arch`-unknown-linux-gnu
+RUN make
+RUN make install
+RUN pip install --no-cache-dir TA-Lib
+# Copy requirements file
+COPY requirements.txt .
 
-# Install Python TA-Lib and other requirements
-COPY requirements.txt /
-RUN pip install --no-cache-dir TA-Lib && \
-    pip install --no-cache-dir --upgrade -r requirements.txt
+# Install Python dependencies
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir numpy && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir ta-lib
 
-# Copy application files
-COPY /app /app
-COPY /config /config
+# Create a non-root user and set permissions
+RUN useradd -m -u 1000 appuser && \
+    chown -R appuser:appuser /app
 
-# Set the entrypoint
-ENTRYPOINT ["python", "app/main.py"]
+# Copy application code
+COPY . .
+
+# Set correct ownership
+RUN chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
+
+# Command to run the application
+CMD ["python", "main.py"]
