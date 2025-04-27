@@ -27,6 +27,8 @@ COPY requirements.txt .
 
 # Install Python dependencies
 RUN pip install --upgrade pip && \
+    pip install numpy && \
+    pip install ta-lib && \
     pip install -r requirements.txt
 
 # Create a non-root user
