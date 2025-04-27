@@ -8,6 +8,8 @@ database:
   name: "database/financial_monitor.db"
   backup_enabled: true
   backup_path: "backups"
+polygon:
+  api_key: ${POLYGON_API_KEY}
 news_collector:
   interval_seconds: 30
   business_hours:
