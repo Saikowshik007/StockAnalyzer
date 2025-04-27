@@ -35,8 +35,7 @@ class Summarizer:
             self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
             self.model = AutoModelForSequenceClassification.from_pretrained(
                 self.model_name,
-                torch_dtype=torch.float16,
-                from_tf=True
+                torch_dtype=torch.float16
             )
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             self.model.to(self.device)
