@@ -33,15 +33,16 @@ RUN pip install --upgrade pip && \
     pip install ta-lib && \
     pip install -r requirements.txt
 
-# Create a non-root user and set permissions
-RUN useradd -m -u 1000 appuser && \
-    chown -R appuser:appuser /app
+# Create a non-root user
+RUN useradd -m -u 1000 appuser
 
 # Copy application code
 COPY . .
 
-# Set correct ownership
-RUN chown -R appuser:appuser /app
+# Set correct ownership and permissions
+RUN chown -R appuser:appuser /app && \
+    chmod -R 755 /app && \
+    chmod -R 777 /app/logs /app/database /app/backups
 
 # Switch to non-root user
 USER appuser
