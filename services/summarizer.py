@@ -36,7 +36,7 @@ class Summarizer:
             self.model = AutoModelForSequenceClassification.from_pretrained(
                 self.model_name,
                 torch_dtype=torch.float16,
-                low_cpu_mem_usage=True
+                from_tf=True
             )
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             self.model.to(self.device)
