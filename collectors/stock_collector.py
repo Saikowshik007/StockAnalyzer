@@ -124,10 +124,12 @@ class YahooMultiStockCollector:
             return None
 
     def connect_websocket(self):
-        """Connect to Yahoo Finance websocket."""
-        # First get a valid crumb if needed
-        if not self.crumb:
-            self._get_yahoo_crumb()
+        """Connect to Yahoo Finance websocket with proper authentication."""
+        # Make sure we have authentication
+        if not hasattr(self, 'cookie') or not self.crumb:
+            if not self._get_yahoo_auth():
+                logger.error("Failed to authenticate with Yahoo Finance")
+                return
 
         def on_open(ws):
             logger.info("WebSocket connection opened")
@@ -155,8 +157,19 @@ class YahooMultiStockCollector:
             self.connected = False
 
         # Create websocket connection to Yahoo Finance
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36",
+            "Cookie": f"{self.cookie.name}={self.cookie.value}"
+        }
+
+        # Add crumb to URL if available
+        ws_url = f"{self.ws_url}"
+        if self.crumb:
+            ws_url += f"?crumb={self.crumb}"
+
         self.ws = websocket.WebSocketApp(
-            f"{self.ws_url}",  # We'll add specific params in _subscribe_watchlist
+            ws_url,
+            header=headers,
             on_open=on_open,
             on_message=on_message,
             on_error=on_error,
@@ -531,7 +544,7 @@ class YahooMultiStockCollector:
             logger.error(f"Error initializing data for {ticker_symbol}: {e}")
 
     def _fetch_yahoo_historical_data(self, ticker, interval, days_back):
-        """Fetch historical data from Yahoo Finance API."""
+        """Fetch historical data from Yahoo Finance API using proper authentication."""
         # Convert interval to Yahoo format if needed
         yahoo_interval = self._convert_to_yahoo_interval(interval)
 
@@ -549,87 +562,98 @@ class YahooMultiStockCollector:
         if sleep_time > 0:
             time.sleep(sleep_time)
 
+        # Make sure we have authentication
+        if not hasattr(self, 'cookie') or not self.crumb:
+            if not self._get_yahoo_auth():
+                logger.error("Failed to authenticate with Yahoo Finance")
+                return None
+
         # Set date range
         end_ts = int(time.time())
         start_ts = end_ts - (days_back * 24 * 60 * 60)
 
         # Yahoo Finance API endpoint
-        url = f"{self.base_url}/v8/finance/chart/{ticker}"
+        url = f"{self.base_url}/v7/finance/download/{ticker}"
 
         params = {
             "period1": start_ts,
             "period2": end_ts,
             "interval": yahoo_interval,
-            "includePrePost": "true",
-            "events": "div,split"
+            "events": "history",
+            "crumb": self.crumb
         }
 
         try:
-            response = requests.get(url, params=params)
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36"
+            }
+
+            response = requests.get(
+                url,
+                params=params,
+                headers=headers,
+                cookies={self.cookie.name: self.cookie.value}
+            )
 
             if response.status_code != 200:
                 logger.error(f"Error fetching Yahoo data: {response.status_code} - {response.text}")
+
+                # If authentication failed, try to refresh auth
+                if response.status_code in [401, 403, 429]:
+                    logger.info("Attempting to refresh authentication...")
+                    if self._get_yahoo_auth():
+                        # Retry with new auth data
+                        return self._fetch_yahoo_historical_data(ticker, interval, days_back)
+
                 return None
 
-            data = response.json()
+            # Process CSV response
+            content = response.text
+            if ',' in content and 'Date' in content:
+                # Parse CSV data
+                lines = content.strip().split('\n')
+                headers = lines[0].split(',')
 
-            # Parse Yahoo Finance response
-            chart_data = data.get("chart", {}).get("result", [])
-            if not chart_data:
-                logger.error("No chart data found in Yahoo response")
-                return None
+                data_dict = {
+                    "datetime": [],
+                    "open": [],
+                    "high": [],
+                    "low": [],
+                    "close": [],
+                    "volume": []
+                }
 
-            chart_data = chart_data[0]
+                for line in lines[1:]:
+                    values = line.split(',')
+                    if len(values) >= 6:
+                        date_str = values[0]
+                        try:
+                            # Parse date
+                            date = datetime.strptime(date_str, '%Y-%m-%d')
+                            # Add data to dict
+                            data_dict["datetime"].append(date)
+                            data_dict["open"].append(float(values[1]) if values[1] != 'null' else None)
+                            data_dict["high"].append(float(values[2]) if values[2] != 'null' else None)
+                            data_dict["low"].append(float(values[3]) if values[3] != 'null' else None)
+                            data_dict["close"].append(float(values[4]) if values[4] != 'null' else None)
+                            data_dict["volume"].append(int(values[6]) if values[6] != 'null' and len(values) > 6 else 0)
+                        except (ValueError, IndexError) as e:
+                            logger.warning(f"Error parsing line: {line}, error: {e}")
 
-            # Extract timestamp and indicators
-            timestamps = chart_data.get("timestamp", [])
-            quote = chart_data.get("indicators", {}).get("quote", [{}])[0]
+                df = pd.DataFrame(data_dict)
+                df = df.dropna()
 
-            # Extract OHLCV data
-            opens = quote.get("open", [])
-            highs = quote.get("high", [])
-            lows = quote.get("low", [])
-            closes = quote.get("close", [])
-            volumes = quote.get("volume", [])
+                # Cache the result
+                if not df.empty:
+                    with self.lock:
+                        self.api_cache[cache_key] = df.copy()
+                        # Set expiry time (30 minutes)
+                        self.cache_expiry[cache_key] = datetime.now() + timedelta(minutes=30)
 
-            # Create DataFrame
-            data_dict = {
-                "timestamp": timestamps,
-                "open": opens,
-                "high": highs,
-                "low": lows,
-                "close": closes,
-                "volume": volumes
-            }
+                return df
 
-            # Check if all lists have the same length
-            lengths = {len(v) for v in data_dict.values()}
-            if len(lengths) > 1:
-                logger.error(f"Inconsistent data lengths in Yahoo response: {lengths}")
-                # Truncate to shortest length
-                min_len = min(lengths)
-                for k in data_dict:
-                    data_dict[k] = data_dict[k][:min_len]
-
-            df = pd.DataFrame(data_dict)
-
-            # Convert timestamp to datetime
-            df["datetime"] = pd.to_datetime(df["timestamp"], unit="s", utc=True)
-
-            # Select only the columns we need
-            df = df[["datetime", "open", "high", "low", "close", "volume"]]
-
-            # Handle NaN values
-            df = df.dropna()
-
-            # Cache the result
-            if not df.empty:
-                with self.lock:
-                    self.api_cache[cache_key] = df.copy()
-                    # Set expiry time (30 minutes)
-                    self.cache_expiry[cache_key] = datetime.now() + timedelta(minutes=30)
-
-            return df
+            logger.error("Unexpected response format from Yahoo Finance")
+            return None
 
         except Exception as e:
             logger.error(f"Error fetching Yahoo data for {ticker}: {e}")
@@ -974,3 +998,51 @@ class YahooMultiStockCollector:
             self.monitor_thread.join(timeout=1)
 
         logger.info("YahooMultiStockCollector closed successfully")
+
+
+    def _get_yahoo_auth(self):
+        """Get Yahoo Finance cookie and crumb for authentication using a simpler approach."""
+        try:
+            # Setup headers with user agent
+            user_agent_key = "User-Agent"
+            user_agent_value = "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36"
+            headers = {user_agent_key: user_agent_value}
+
+            # Step 1: Get the cookie
+            response = requests.get(
+                "https://fc.yahoo.com", headers=headers, allow_redirects=True
+            )
+
+            if not response.cookies:
+                logger.error("Failed to obtain Yahoo auth cookie")
+                return False
+
+            cookie = list(response.cookies)[0]
+
+            # Step 2: Use the cookie to get the crumb
+            crumb_response = requests.get(
+                "https://query1.finance.yahoo.com/v1/test/getcrumb",
+                headers=headers,
+                cookies={cookie.name: cookie.value},
+                allow_redirects=True,
+            )
+
+            if crumb_response.status_code != 200:
+                logger.error(f"Failed to get crumb, status code: {crumb_response.status_code}")
+                return False
+
+            crumb = crumb_response.text
+
+            if not crumb:
+                logger.error("Empty crumb returned from Yahoo")
+                return False
+
+            # Store auth data for later use
+            self.cookie = cookie
+            self.crumb = crumb
+            logger.info(f"Successfully obtained Yahoo auth: cookie={cookie.name}, crumb={crumb}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error getting Yahoo authentication: {e}")
+            return False
