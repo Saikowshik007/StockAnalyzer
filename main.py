@@ -5,7 +5,7 @@ import threading
 import time
 
 from collectors.news_collector import NewsMonitor
-from collectors.stock_collector import PolygonMultiStockCollector
+from collectors.stock_collector import MultiStockCollector
 from database.db_manager import DatabaseManager
 from services.bot_service import TelegramBot
 from services.pattern_monitor import TalibPatternMonitor
@@ -38,14 +38,8 @@ class FinancialMonitorApp:
         db_config = self.config.get('database', {})
         self.db_manager = DatabaseManager(db_config)
 
-        # Get Polygon API key from config or environment
-        self.polygon_api_key = self.config.get('polygon', {}).get('api_key') or os.environ.get("POLYGON_API_KEY")
-        if not self.polygon_api_key:
-            logger.error("Polygon API key not found in config or environment variables")
-            raise ValueError("Polygon API key is required")
-
-        # Initialize the Polygon stock collector
-        self.stock_collector = PolygonMultiStockCollector(self.polygon_api_key, self.db_manager)
+        # Update stock collector with multi-timeframe capabilities
+        self.stock_collector = MultiStockCollector(self.db_manager)
 
         # Set timeframes from config or use defaults
         timeframes = self.config.get('timeframes', {
@@ -95,23 +89,12 @@ class FinancialMonitorApp:
             self.db_manager.add_to_watchlist(ticker)
             self.stock_collector.add_stock(ticker)
 
-    def run_websocket_connection(self):
-        """Connect to the Polygon.io websocket and keep it running."""
+    def run_stock_collector(self):
+        """Run the stock collector."""
         try:
-            # Connect to the websocket
-            self.stock_collector.connect_websocket()
-
-            # Keep the connection alive
-            while not self.shutdown_event.is_set():
-                # Check if we're still connected
-                if not self.stock_collector.ws_connected:
-                    logger.warning("Websocket disconnected, attempting to reconnect...")
-                    self.stock_collector.connect_websocket()
-
-                time.sleep(30)  # Check every 30 seconds
-
+            self.stock_collector.start()
         except Exception as e:
-            logger.error(f"Error in websocket connection: {e}")
+            logger.error(f"Error running stock collector: {e}")
 
     def run_stock_data_saver(self):
         """Periodically save stock data to database for all timeframes."""
@@ -184,13 +167,9 @@ class FinancialMonitorApp:
             # Start backup manager
             self.db_manager.backup_database()
 
-            # Start websocket connection in a separate thread
-            websocket_thread = threading.Thread(target=self.run_websocket_connection, daemon=True)
-            websocket_thread.start()
-
             # Start stock data saver in a separate thread
-            saver_thread = threading.Thread(target=self.run_stock_data_saver, daemon=True)
-            saver_thread.start()
+            # saver_thread = threading.Thread(target=self.run_stock_data_saver, daemon=True)
+            # saver_thread.start()
 
             # Start pattern monitor in a separate thread
             pattern_thread = threading.Thread(target=self.run_pattern_monitor, daemon=True)
@@ -225,8 +204,6 @@ class FinancialMonitorApp:
         self.shutdown_event.set()
         self.news_monitor.stop()
 
-        # Close the websocket connection
-        self.stock_collector.close()
 
         # Cancel all running tasks
         for task in self.tasks:
