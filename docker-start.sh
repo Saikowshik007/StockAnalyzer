@@ -2,7 +2,7 @@ docker build -t financial-news-monitor .
 docker stop financial-monitor
 docker rm financial-monitor
 docker run -d --name financial-monitor \
-  --env-file ~/Desktop/env_files/.env \
+  --env-file ../env_files/.env \
   -v ./database:/app/database \
   -v ./logs:/app/logs \
   -v ./backups:/app/backups \
