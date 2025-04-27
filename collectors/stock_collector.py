@@ -442,7 +442,7 @@ class YahooMultiStockCollector:
         try:
             # Yahoo Finance requires different subscription format
             # Typically PubSub pattern with topics like "ticker/AAPL"
-            subscriptions = []
+            subscriptions = ["ticker/SPY"]
             for ticker in self.watchlist:
                 # Format for Yahoo finance - real implementation may vary
                 subscriptions.append({
