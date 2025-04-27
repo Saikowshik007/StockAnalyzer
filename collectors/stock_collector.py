@@ -2,47 +2,51 @@ import logging
 import pandas as pd
 import threading
 import talib
-import websocket
-import json
 import time
+import json
 from datetime import datetime, timedelta
-import requests
 import pytz
 from queue import Queue
+from typing import List, Dict, Optional
 import asyncio
-
+from polygon import WebSocketClient, RESTClient
+from polygon.websocket.models import WebSocketMessage, EquityAgg, EquityTrade, EquityQuote
 logger = logging.getLogger(__name__)
 pd.set_option('future.no_silent_downcasting', True)
-
 class PolygonMultiStockCollector:
-    def __init__(self, api_key, db_manager=None):
+    def __init__(self, api_key: str, db_manager=None):
+        """
+        Initialize Polygon Multi-Timeframe Stock Collector.
+            Args:
+                api_key: Polygon.io API key
+                db_manager: Optional database manager for persistence
+            """
         self.api_key = api_key
-        self.base_url = "https://api.polygon.io"
-        self.ws_url = "wss://socket.polygon.io/stocks"  # Correct WebSocket URL for stocks
         self.watchlist = set()
         self.db_manager = db_manager
         self.lock = threading.Lock()
 
+        # Initialize REST and WebSocket clients
+        self.rest_client = RESTClient(api_key)
+        self.ws_client = None
+        self.ws_connected = False
+        self.ws_thread = None
+
         # Data storage for each ticker and timeframe
         self.stock_data = {}
 
-        # Cache for API responses
+        # Latest trades and quotes
+        self.latest_trades = {}
+        self.latest_quotes = {}
+
+        # API cache
         self.api_cache = {}
         self.cache_expiry = {}
-
-        # Track authentication status
-        self.authenticated = False
 
         # Rate limiting tracking
         self.request_count = 0
         self.request_reset_time = datetime.now() + timedelta(minutes=1)
         self.max_requests_per_minute = 5  # Conservative default
-
-        # Websocket connection
-        self.ws = None
-        self.ws_connected = False
-        self.message_queue = Queue()
-        self.ws_thread = None
 
         # Default time intervals for multi-timeframe analysis
         self.timeframes = {
@@ -69,14 +73,12 @@ class PolygonMultiStockCollector:
         # Base timeframe for data collection (collect once and derive others)
         self.base_timeframe = '1m'
 
+        # Flag for clean shutdown
+        self.running = True
+
         # Load existing watchlist from DB if available
         if self.db_manager:
             self._load_watchlist_from_db()
-
-        # Start processing thread
-        self.processing_thread = threading.Thread(target=self._process_messages)
-        self.processing_thread.daemon = True
-        self.processing_thread.start()
 
         # Start cache management thread
         self.cache_thread = threading.Thread(target=self._manage_cache)
@@ -97,75 +99,47 @@ class PolygonMultiStockCollector:
                 logger.info(f"Loaded watchlist from database: {list(self.watchlist)}")
 
     def connect_websocket(self):
-        """Connect to Polygon.io websocket with proper authentication."""
-        def on_open(ws):
-            logger.info("WebSocket connection opened")
-            self.ws_connected = True
+        """Connect to Polygon.io websocket."""
+        if self.ws_client:
+            logger.info("WebSocket already connected")
+            return
 
-            # Send authentication message
-            auth_msg = {
-                "action": "auth",
-                "params": self.api_key
-            }
-
-            logger.info("Sending authentication message")
-            ws.send(json.dumps(auth_msg))
-
-        def on_message(ws, message):
-            # Add message to queue for processing
-            self.message_queue.put(message)
-
-            # Check for authentication success
-            try:
-                data = json.loads(message)
-                if isinstance(data, list):
-                    for event in data:
-                        if event.get("status") == "auth_success":
-                            logger.info("Authentication successful")
-                            self.authenticated = True
-                            self._subscribe_watchlist()
-                elif isinstance(data, dict):
-                    if data.get("status") == "auth_success":
-                        logger.info("Authentication successful")
-                        self.authenticated = True
-                        self._subscribe_watchlist()
-                    elif data.get("status") == "auth_failed":
-                        logger.error("Authentication failed. Check API key or subscription level.")
-                        self.ws_connected = False
-                        self.authenticated = False
-            except Exception as e:
-                logger.error(f"Error parsing message: {e}")
-
-            def on_error(ws, error):
-                logger.error(f"WebSocket error: {error}")
-                self.ws_connected = False
-                self.authenticated = False
-
-            def on_close(ws, close_status_code, close_msg):
-                logger.info(f"WebSocket connection closed: {close_status_code} - {close_msg}")
-                self.ws_connected = False
-                self.authenticated = False
-
-            # Create websocket connection
-            self.ws = websocket.WebSocketApp(
-                self.ws_url,
-                on_open=on_open,
-                on_message=on_message,
-                on_error=on_error,
-                on_close=on_close
+        try:
+            # Create websocket client using official SDK
+            self.ws_client = WebSocketClient(
+                api_key=self.api_key,
+                feed="sip",  # Use SIP feed for higher quality data
+                market="stocks"
             )
 
-            # Start websocket in a separate thread
-            self.ws_thread = threading.Thread(target=self.ws.run_forever)
-            self.ws_thread.daemon = True
+            # Start the websocket thread
+            self.ws_thread = threading.Thread(
+                target=self.ws_client.run,
+                args=(self._handle_ws_message,),
+                daemon=True
+            )
             self.ws_thread.start()
+
+            # Mark as connected (we assume it will connect successfully)
+            self.ws_connected = True
+            logger.info("WebSocket connection started")
+
+            # Wait a moment for connection to establish before subscribing
+            time.sleep(2)
+
+            # Subscribe to the watchlist
+            self._subscribe_watchlist()
+
+        except Exception as e:
+            logger.error(f"Error connecting to WebSocket: {e}")
+            self.ws_connected = False
 
     def _monitor_connection(self):
         """Monitor and maintain websocket connection."""
         reconnect_delay = 5  # seconds
         max_reconnect_delay = 300  # 5 minutes
 
-        while True:
+        while self.running:
             if not self.ws_connected:
                 logger.info(f"Connection lost or not established. Reconnecting in {reconnect_delay} seconds...")
                 time.sleep(reconnect_delay)
@@ -179,7 +153,7 @@ class PolygonMultiStockCollector:
                     reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
             else:
                 # Check if we need to resubscribe
-                if self.ws_connected and self.authenticated and not self._check_subscriptions():
+                if self.ws_connected and not self._check_subscriptions():
                     logger.info("Resubscribing to watchlist tickers")
                     self._subscribe_watchlist()
 
@@ -188,96 +162,89 @@ class PolygonMultiStockCollector:
 
     def _check_subscriptions(self):
         """Check if we have active subscriptions."""
-        # This is a simplified check - in a real system you might
-        # want to ping the server or track subscription status
-        return len(self.watchlist) > 0 and self.authenticated
+        # This is a simplified check based on watchlist size
+        return len(self.watchlist) > 0 and self.ws_connected
 
-    def _process_messages(self):
-        """Process messages from the websocket queue."""
-        while True:
-            try:
-                if not self.message_queue.empty():
-                    message = self.message_queue.get()
-                    try:
-                        data = json.loads(message)
-
-                        # Handle different message types
-                        if isinstance(data, list):
-                            for event in data:
-                                self._process_single_event(event)
-                        elif isinstance(data, dict):
-                            if data.get("status") == "connected":
-                                logger.info("Connected to Polygon.io websocket")
-                            elif data.get("status") == "auth_success":
-                                logger.info("Successfully authenticated with Polygon.io")
-                            elif data.get("status") == "success" and data.get("message") == "subscribed":
-                                logger.info(f"Successfully subscribed to: {data.get('subscriptions', [])}")
-                            else:
-                                self._process_single_event(data)
-                    except json.JSONDecodeError:
-                        logger.error(f"Invalid JSON in message: {message}")
-                    except Exception as e:
-                        logger.error(f"Error processing message: {e}")
-            except Exception as e:
-                logger.error(f"Error in message processing: {e}")
-
-            # Small sleep to prevent CPU hogging
-            time.sleep(0.01)
-
-    def _process_single_event(self, event):
-        """Process a single event from Polygon websocket with improved error handling."""
+    def _handle_ws_message(self, msgs: List[WebSocketMessage]):
+        """Process messages from the WebSocket."""
         try:
-            # Check for the event type
-            event_type = event.get("ev")
-
-            if event_type == "AM":  # Aggregate minute data
-                # Extract ticker symbol
-                ticker = event.get("sym")
-                if not ticker:
-                    logger.warning(f"Missing ticker symbol in event: {event}")
-                    return
-
-                # Extract timestamp - convert from milliseconds to datetime
-                timestamp_ms = event.get("s") or event.get("t")  # try both "s" and "t" fields
-                if not timestamp_ms:
-                    logger.warning(f"Missing timestamp in event: {event}")
-                    return
-
-                timestamp = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=pytz.UTC)
-
-                # Extract OHLCV data
-                bar_data = {
-                    'datetime': timestamp,
-                    'open': event.get("o"),
-                    'high': event.get("h"),
-                    'low': event.get("l"),
-                    'close': event.get("c"),
-                    'volume': event.get("v")
-                }
-
-                # Verify all required fields are present
-                if None in bar_data.values():
-                    missing_fields = [k for k, v in bar_data.items() if v is None]
-                    logger.warning(f"Missing fields {missing_fields} in event: {event}")
-                    return
-
-                # Update our internal data structure
-                self._update_ticker_data(ticker, bar_data)
-
-            elif event_type == "T":  # Trade event
-                # Process trade data if needed
-                pass
-
-            elif event_type:
-                # Log other event types for debugging
-                logger.debug(f"Received event type: {event_type}, data: {event}")
-
+            for msg in msgs:
+                if isinstance(msg, EquityAgg):
+                    self._process_agg(msg)
+                elif isinstance(msg, EquityTrade):
+                    self._process_trade(msg)
+                elif isinstance(msg, EquityQuote):
+                    self._process_quote(msg)
         except Exception as e:
-            logger.error(f"Error processing event: {e}, event data: {event}")
+            logger.error(f"Error processing websocket message: {e}")
+
+    def _process_agg(self, agg: EquityAgg):
+        """Process a single aggregate bar message."""
+        ticker = agg.symbol
+
+        # Skip if not in our watchlist
+        if ticker not in self.watchlist:
+            return
+
+        # Convert to our internal format
+        timestamp = datetime.fromtimestamp(agg.start_timestamp / 1000.0, tz=pytz.UTC)
+
+        bar_data = {
+            'datetime': timestamp,
+            'open': agg.open,
+            'high': agg.high,
+            'low': agg.low,
+            'close': agg.close,
+            'volume': agg.volume
+        }
+
+        # Update our internal data structure
+        self._update_ticker_data(ticker, bar_data)
+
+    def _process_trade(self, trade: EquityTrade):
+        """Process a single trade message."""
+        ticker = trade.symbol
+
+        # Skip if not in our watchlist
+        if ticker not in self.watchlist:
+            return
+
+        # Update latest trade information
+        timestamp = datetime.fromtimestamp(trade.timestamp / 1000.0, tz=pytz.UTC)
+
+        with self.lock:
+            self.latest_trades[ticker] = {
+                'price': trade.price,
+                'size': trade.size,
+                'timestamp': timestamp,
+                'exchange': trade.exchange,
+                'conditions': trade.conditions
+            }
+
+    def _process_quote(self, quote: EquityQuote):
+        """Process a single quote message."""
+        ticker = quote.symbol
+
+        # Skip if not in our watchlist
+        if ticker not in self.watchlist:
+            return
+
+        # Update latest quote information
+        timestamp = datetime.fromtimestamp(quote.timestamp / 1000.0, tz=pytz.UTC)
+
+        with self.lock:
+            self.latest_quotes[ticker] = {
+                'bid_price': quote.bid_price,
+                'bid_size': quote.bid_size,
+                'ask_price': quote.ask_price,
+                'ask_size': quote.ask_size,
+                'timestamp': timestamp,
+                'exchange': quote.bid_exchange  # or ask_exchange
+            }
 
     def _manage_cache(self):
         """Background thread to manage cache expiry."""
-        while True:
+        while self.running:
             try:
                 current_time = datetime.now()
                 expired_keys = []
@@ -307,45 +274,43 @@ class PolygonMultiStockCollector:
             time.sleep(10)
 
     def _update_ticker_data(self, ticker, bar_data):
-        """Update internal data structure with new bar data and derive higher timeframes."""
+        """Update internal data structure with new bar data."""
         with self.lock:
             if ticker not in self.stock_data:
                 self.stock_data[ticker] = {}
 
-            # For 1-minute data (base timeframe), just append
+            # Update base timeframe data
             if self.base_timeframe not in self.stock_data[ticker]:
                 self.stock_data[ticker][self.base_timeframe] = pd.DataFrame(columns=[
                     'datetime', 'open', 'high', 'low', 'close', 'volume'
                 ])
 
-            # Add new data point
+            # Add new data point to base timeframe
             df = self.stock_data[ticker][self.base_timeframe]
-            new_row = pd.DataFrame([bar_data])
 
             # Check if this bar is already in our data
-            if not df.empty and df['datetime'].max() >= bar_data['datetime']:
-                # Update existing bar if needed
-                idx = df[df['datetime'] == bar_data['datetime']].index
-                if not idx.empty:
-                    # Update the high, low, close, and volume
-                    df.at[idx[0], 'high'] = max(df.at[idx[0], 'high'], bar_data['high'])
-                    df.at[idx[0], 'low'] = min(df.at[idx[0], 'low'], bar_data['low'])
-                    df.at[idx[0], 'close'] = bar_data['close']
-                    df.at[idx[0], 'volume'] += bar_data['volume']
-                    self.stock_data[ticker][self.base_timeframe] = df
-                return
-
-            # Append the new row
-            self.stock_data[ticker][self.base_timeframe] = pd.concat([df, new_row], ignore_index=True)
+            existing_bar = df[df['datetime'] == bar_data['datetime']]
+            if len(existing_bar) == 0:
+                # Add new bar
+                new_row = pd.DataFrame([bar_data])
+                self.stock_data[ticker][self.base_timeframe] = pd.concat([df, new_row], ignore_index=True)
+            else:
+                # Update existing bar
+                idx = df[df['datetime'] == bar_data['datetime']].index[0]
+                df.at[idx, 'high'] = max(df.at[idx, 'high'], bar_data['high'])
+                df.at[idx, 'low'] = min(df.at[idx, 'low'], bar_data['low'])
+                df.at[idx, 'close'] = bar_data['close']
+                df.at[idx, 'volume'] += bar_data['volume']
+                self.stock_data[ticker][self.base_timeframe] = df
 
             # Limit the size of stored data
-            if len(self.stock_data[ticker][self.base_timeframe]) > 10000:  # Increased for better aggregation
+            if len(self.stock_data[ticker][self.base_timeframe]) > 10000:
                 self.stock_data[ticker][self.base_timeframe] = self.stock_data[ticker][self.base_timeframe].tail(10000)
 
             # Sort by datetime to ensure correct order
             self.stock_data[ticker][self.base_timeframe] = self.stock_data[ticker][self.base_timeframe].sort_values('datetime')
 
-            # Now update all derived timeframes
+            # Update derived timeframes
             self._update_derived_timeframes(ticker)
 
     def _update_derived_timeframes(self, ticker):
@@ -408,6 +373,30 @@ class PolygonMultiStockCollector:
 
         return aggregated
 
+    def _subscribe_watchlist(self):
+        """Subscribe to all tickers in watchlist."""
+        if not self.ws_connected or not self.watchlist:
+            logger.warning("Cannot subscribe: not connected or empty watchlist")
+            return
+
+        # Create subscription channels
+        channels = []
+
+        for ticker in self.watchlist:
+            # Subscribe to aggregates (A), trades (T), and quotes (Q)
+            channels.extend([
+                f"A.{ticker}",
+                f"T.{ticker}",
+                f"Q.{ticker}"
+            ])
+
+        if channels:
+            try:
+                self.ws_client.subscribe(*channels)
+                logger.info(f"Subscribed to {len(channels)} channels for {len(self.watchlist)} tickers")
+            except Exception as e:
+                logger.error(f"Error subscribing to channels: {e}")
+
     def _check_rate_limit(self):
         """Check if we're approaching rate limit and back off if needed."""
         with self.lock:
@@ -429,25 +418,6 @@ class PolygonMultiStockCollector:
             self.request_count += 1
             return 0
 
-    def _subscribe_watchlist(self):
-        """Subscribe to all tickers in watchlist using proper format."""
-        if not self.ws_connected or not self.authenticated or not self.watchlist:
-            logger.warning("Cannot subscribe: not connected, not authenticated, or empty watchlist")
-            return
-
-        # Create subscription message for minute aggregates
-        # Format: "AM.TICKER" for each ticker
-        ticker_channels = [f"AM.{ticker}" for ticker in self.watchlist]
-
-        # Format according to Polygon.io WebSocket API
-        subscribe_msg = {
-            "action": "subscribe",
-            "params": ",".join(ticker_channels)
-        }
-
-        logger.info(f"Subscribing to {len(ticker_channels)} ticker channels: {ticker_channels}")
-        self.ws.send(json.dumps(subscribe_msg))
-
     def add_stock(self, ticker_symbol):
         """Add a stock to the watchlist and persist to database."""
         with self.lock:
@@ -459,12 +429,12 @@ class PolygonMultiStockCollector:
                     self.db_manager.add_to_watchlist(ticker_symbol)
 
                 # Subscribe to the new ticker if websocket is connected
-                if self.ws_connected and self.authenticated:
-                    subscribe_msg = {
-                        "action": "subscribe",
-                        "params": f"AM.{ticker_symbol}"
-                    }
-                    self.ws.send(json.dumps(subscribe_msg))
+                if self.ws_connected:
+                    self.ws_client.subscribe(
+                        f"A.{ticker_symbol}",
+                        f"T.{ticker_symbol}",
+                        f"Q.{ticker_symbol}"
+                    )
 
                 # Initialize historical data for this ticker
                 self._initialize_ticker_data(ticker_symbol)
@@ -476,18 +446,17 @@ class PolygonMultiStockCollector:
                 return False
 
     def _initialize_ticker_data(self, ticker_symbol):
-        """Initialize historical data for a ticker symbol using cached approach."""
+        """Initialize historical data for a ticker symbol."""
         # Determine how much data we need based on the longest timeframe
         max_minutes = max(self.interval_to_minutes.get(tf_config['interval'], 1)
                           for tf_config in self.timeframes.values())
 
-        # Calculate how many days of 1-minute data we need
-        # Ensure we have enough data for the longest timeframe
+        # Calculate how many days of base timeframe data we need
         bars_needed = max_minutes * 100  # Get enough bars for indicators
         days_back = max(1, int(bars_needed / (6.5 * 60)))  # Trading hours per day
 
         try:
-            # Fetch 1-minute data (our base timeframe) once
+            # Fetch base timeframe data once
             data = self._fetch_historical_data_cached(
                 ticker_symbol,
                 self.base_timeframe,
@@ -532,23 +501,46 @@ class PolygonMultiStockCollector:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days_back)
 
-        # Fetch data from API
-        data = self._fetch_historical_aggs(
-            ticker,
-            polygon_multiplier,
-            polygon_timespan,
-            start_date.strftime('%Y-%m-%d'),
-            end_date.strftime('%Y-%m-%d')
-        )
+        # Format dates for API
+        start_str = start_date.strftime('%Y-%m-%d')
+        end_str = end_date.strftime('%Y-%m-%d')
 
-        # Cache the result for future use
-        if data is not None and not data.empty:
-            with self.lock:
-                self.api_cache[cache_key] = data.copy()
-                # Set expiry time (30 minutes for now)
-                self.cache_expiry[cache_key] = datetime.now() + timedelta(minutes=30)
+        try:
+            # Use the RESTClient from official SDK
+            aggs = self.rest_client.get_aggs(
+                ticker=ticker,
+                multiplier=polygon_multiplier,
+                timespan=polygon_timespan,
+                from_=start_str,
+                to=end_str,
+                limit=50000
+            )
 
-        return data
+            # Convert to our standard DataFrame format
+            if aggs:
+                df = pd.DataFrame([{
+                    'datetime': datetime.fromtimestamp(a.timestamp / 1000.0, tz=pytz.UTC),
+                    'open': a.open,
+                    'high': a.high,
+                    'low': a.low,
+                    'close': a.close,
+                    'volume': a.volume
+                } for a in aggs])
+
+                # Cache the result
+                if not df.empty:
+                    with self.lock:
+                        self.api_cache[cache_key] = df.copy()
+                        # Set expiry time (30 minutes)
+                        self.cache_expiry[cache_key] = datetime.now() + timedelta(minutes=30)
+
+                return df
+
+            return pd.DataFrame()
+
+        except Exception as e:
+            logger.error(f"Error fetching historical data for {ticker}: {e}")
+            return pd.DataFrame()
 
     def _convert_interval_format(self, yf_interval):
         """Convert yfinance interval format to polygon.io format."""
@@ -579,61 +571,6 @@ class PolygonMultiStockCollector:
             # Default
             return 1, 'minute'
 
-    def _fetch_historical_aggs(self, ticker, multiplier, timespan, start_date, end_date):
-        """Fetch historical aggregates from Polygon REST API with rate limiting."""
-        endpoint = f"/v2/aggs/ticker/{ticker}/range/{multiplier}/{timespan}/{start_date}/{end_date}"
-        params = {
-            "apiKey": self.api_key,
-            "sort": "asc",
-            "limit": 50000
-        }
-
-        url = f"{self.base_url}{endpoint}"
-
-        try:
-            response = requests.get(url, params=params)
-
-            # Handle rate limiting
-            if response.status_code == 429:
-                logger.warning("Rate limit exceeded. Waiting before retry...")
-                time.sleep(60)  # Wait a minute before retrying
-                return self._fetch_historical_aggs(ticker, multiplier, timespan, start_date, end_date)
-
-            if response.status_code != 200:
-                logger.error(f"Error fetching historical data: {response.status_code} - {response.text}")
-                return None
-
-            data = response.json()
-
-            if data["status"] != "OK" or "results" not in data:
-                logger.error("No results found or API error")
-                return None
-
-            # Convert to DataFrame
-            df = pd.DataFrame(data["results"])
-
-            # Rename columns to match our expected format
-            df = df.rename(columns={
-                "v": "volume",
-                "o": "open",
-                "c": "close",
-                "h": "high",
-                "l": "low",
-                "t": "timestamp"
-            })
-
-            # Convert timestamp from milliseconds to datetime
-            df["datetime"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
-
-            # Select only the columns we need
-            df = df[["datetime", "open", "high", "low", "close", "volume"]]
-
-            return df
-
-        except Exception as e:
-            logger.error(f"Error fetching historical data for {ticker}: {e}")
-            return None
-
     def remove_stock(self, ticker_symbol):
         """Remove a stock from the watchlist and update database."""
         with self.lock:
@@ -645,16 +582,22 @@ class PolygonMultiStockCollector:
                     self.db_manager.remove_from_watchlist(ticker_symbol)
 
                 # Unsubscribe from the ticker if websocket is connected
-                if self.ws_connected and self.authenticated:
-                    unsubscribe_msg = {
-                        "action": "unsubscribe",
-                        "params": f"AM.{ticker_symbol}"
-                    }
-                    self.ws.send(json.dumps(unsubscribe_msg))
+                if self.ws_connected:
+                    self.ws_client.unsubscribe(
+                        f"A.{ticker_symbol}",
+                        f"T.{ticker_symbol}",
+                        f"Q.{ticker_symbol}"
+                    )
 
                 # Remove from our data storage
                 if ticker_symbol in self.stock_data:
                     del self.stock_data[ticker_symbol]
+
+                # Remove from latest trades and quotes
+                if ticker_symbol in self.latest_trades:
+                    del self.latest_trades[ticker_symbol]
+                if ticker_symbol in self.latest_quotes:
+                    del self.latest_quotes[ticker_symbol]
 
                 logger.info(f"Removed {ticker_symbol} from watchlist")
                 return True
@@ -666,11 +609,24 @@ class PolygonMultiStockCollector:
         """Return current watchlist."""
         return list(self.watchlist)
 
+    def get_latest_trade(self, ticker_symbol):
+        """Get latest trade for a specific ticker."""
+        with self.lock:
+            if ticker_symbol in self.latest_trades:
+                return self.latest_trades[ticker_symbol].copy()
+            return None
+
+    def get_latest_quote(self, ticker_symbol):
+        """Get latest quote for a specific ticker."""
+        with self.lock:
+            if ticker_symbol in self.latest_quotes:
+                return self.latest_quotes[ticker_symbol].copy()
+            return None
+
     def get_data(self, ticker_symbol, interval='5m'):
         """
         Get data for a specific ticker and interval.
-        Retrieves from cache/memory first, then derives from base data if possible,
-        finally falls back to API only when necessary.
+        Retrieves from cache/memory first, then falls back to API when necessary.
         """
         with self.lock:
             # Find the timeframe that matches this interval
@@ -696,7 +652,7 @@ class PolygonMultiStockCollector:
 
                     return derived_data
 
-        # If we don't have the data locally, fetch it from the API as a last resort
+        # If we don't have the data locally, fetch it from the API
         return self._fetch_historical_data_cached(
             ticker_symbol,
             interval,
@@ -710,16 +666,13 @@ class PolygonMultiStockCollector:
             # Extract interval from the configuration dictionary
             interval = tf_config['interval'] if isinstance(tf_config, dict) else tf_config
             timeframe_data = self.get_data(ticker_symbol, interval=interval)
-            if timeframe_data is not None and not timeframe_data.empty:
-                data[tf_name] = timeframe_data
-            else:
-                data[tf_name] = pd.DataFrame()  # Return empty DataFrame for missing data
+            data[tf_name] = timeframe_data
 
         return data
 
     def calculate_technical_indicators(self, data):
         """Calculate technical indicators for the data."""
-        if data.empty:
+        if data is None or data.empty:
             return {}
 
         try:
@@ -813,9 +766,15 @@ class PolygonMultiStockCollector:
                     'indicators': indicators
                 }
 
+        # Add latest trade and quote information
+        latest_trade = self.get_latest_trade(ticker_symbol)
+        latest_quote = self.get_latest_quote(ticker_symbol)
+
         return {
             'ticker': ticker_symbol,
-            'timeframes': summaries
+            'timeframes': summaries,
+            'latest_trade': latest_trade,
+            'latest_quote': latest_quote
         }
 
     def get_all_summaries(self):
@@ -842,6 +801,15 @@ class PolygonMultiStockCollector:
                         'price': latest_row['close'],
                         'volume': latest_row['volume']
                     }
+
+            # Add the latest trade if available
+            latest_trade = self.get_latest_trade(ticker)
+            if latest_trade:
+                ticker_prices['realtime'] = {
+                    'datetime': latest_trade['timestamp'],
+                    'price': latest_trade['price'],
+                    'size': latest_trade['size']
+                }
 
             if ticker_prices:
                 latest_prices[ticker] = ticker_prices
@@ -914,8 +882,6 @@ class PolygonMultiStockCollector:
                 if should_refresh:
                     logger.info(f"Refreshing data for {ticker}")
                     # Create a task to run the initialization in background
-                    # We'll need to adapt the _initialize_ticker_data method to be async
-                    # or run it in a separate thread
                     asyncio.create_task(self._initialize_ticker_data_async(ticker))
 
                     # Sleep briefly between refreshes to avoid rate limits
@@ -932,18 +898,19 @@ class PolygonMultiStockCollector:
 
     def close(self):
         """Close the websocket connection and clean up resources."""
-        if self.ws:
-            self.ws.close()
-            logger.info("Websocket connection closed")
+        self.running = False
+
+        if self.ws_client:
+            self.ws_client.close()
+            self.ws_connected = False
+            logger.info("WebSocket connection closed")
 
         # Wait for threads to finish
-        if self.cache_thread and self.cache_thread.is_alive():
+        if hasattr(self, 'cache_thread') and self.cache_thread and self.cache_thread.is_alive():
             self.cache_thread.join(timeout=1)
 
-        if self.processing_thread and self.processing_thread.is_alive():
-            self.processing_thread.join(timeout=1)
-
-        if self.monitor_thread and self.monitor_thread.is_alive():
+        if hasattr(self, 'monitor_thread') and self.monitor_thread and self.monitor_thread.is_alive():
             self.monitor_thread.join(timeout=1)
 
         logger.info("PolygonMultiStockCollector closed successfully")
+
