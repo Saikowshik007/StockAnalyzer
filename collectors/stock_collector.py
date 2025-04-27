@@ -453,14 +453,13 @@ class YahooMultiStockCollector:
             return
 
         try:
-            # Yahoo Finance requires different subscription format
-            # Typically PubSub pattern with topics like "ticker/AAPL"
-            subscriptions = ["ticker/SPY"]
-            for ticker in self.watchlist:
-                # Format for Yahoo finance - real implementation may vary
-                subscriptions.append({
-                    "subscribe": f"ticker/{ticker}"
-                })
+            # Create a list of tickers to subscribe to
+            tickers = list(self.watchlist)
+            if "SPY" not in tickers:  # Add SPY if not already in watchlist
+                tickers.append("SPY")
+
+            # Create properly formatted subscription strings
+            subscriptions = [f"ticker/{ticker}" for ticker in tickers]
 
             # Send subscription message
             subscribe_msg = {
@@ -490,9 +489,7 @@ class YahooMultiStockCollector:
                 # Subscribe to the new ticker if websocket is connected
                 if self.ws_connected:
                     subscribe_msg = {
-                        "subscribe": [{
-                            "subscribe": f"ticker/{ticker_symbol}"
-                        }],
+                        "subscribe": [f"ticker/{ticker_symbol}"],
                         "socket_id": self.socket_id
                     }
 
