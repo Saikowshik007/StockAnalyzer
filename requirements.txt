@@ -14,3 +14,4 @@ numpy~=1.26.4
 openai
 yfinance
 sqlalchemy
+hf_xet
