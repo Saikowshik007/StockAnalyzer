@@ -136,29 +136,29 @@ class PolygonMultiStockCollector:
             except Exception as e:
                 logger.error(f"Error parsing message: {e}")
 
-        def on_error(ws, error):
-            logger.error(f"WebSocket error: {error}")
-            self.ws_connected = False
-            self.authenticated = False
+            def on_error(ws, error):
+                logger.error(f"WebSocket error: {error}")
+                self.ws_connected = False
+                self.authenticated = False
 
-        def on_close(ws, close_status_code, close_msg):
-            logger.info(f"WebSocket connection closed: {close_status_code} - {close_msg}")
-            self.ws_connected = False
-            self.authenticated = False
+            def on_close(ws, close_status_code, close_msg):
+                logger.info(f"WebSocket connection closed: {close_status_code} - {close_msg}")
+                self.ws_connected = False
+                self.authenticated = False
 
-        # Create websocket connection
-        self.ws = websocket.WebSocketApp(
-            self.ws_url,
-            on_open=on_open,
-            on_message=on_message,
-            on_error=on_error,
-            on_close=on_close
-        )
+            # Create websocket connection
+            self.ws = websocket.WebSocketApp(
+                self.ws_url,
+                on_open=on_open,
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close
+            )
 
-        # Start websocket in a separate thread
-        self.ws_thread = threading.Thread(target=self.ws.run_forever)
-        self.ws_thread.daemon = True
-        self.ws_thread.start()
+            # Start websocket in a separate thread
+            self.ws_thread = threading.Thread(target=self.ws.run_forever)
+            self.ws_thread.daemon = True
+            self.ws_thread.start()
 
     def _monitor_connection(self):
         """Monitor and maintain websocket connection."""
