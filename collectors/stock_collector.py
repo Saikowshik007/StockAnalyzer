@@ -446,26 +446,26 @@ class YahooMultiStockCollector:
             self.request_count += 1
             return 0
 
-    def _subscribe_watchlist(self):
-        """Subscribe to all tickers in watchlist."""
-        if not self.ws_connected or not self.watchlist:
-            logger.warning("Cannot subscribe: not connected or empty watchlist")
-            return
-
-        try:
-            # Get list of tickers to subscribe to
-            tickers = list(self.watchlist)
-
-            # Create simple subscription message - no need for "ticker/" prefix
-            subscribe_msg = {
-                "subscribe": tickers
-            }
-
-            logger.info(f"Subscribing to {len(tickers)} ticker channels")
-            self.ws.send(json.dumps(subscribe_msg))
-
-        except Exception as e:
-            logger.error(f"Error subscribing to watchlist: {e}")
+    # def _subscribe_watchlist(self):
+    #     """Subscribe to all tickers in watchlist."""
+    #     if not self.ws_connected or not self.watchlist:
+    #         logger.warning("Cannot subscribe: not connected or empty watchlist")
+    #         return
+    #
+    #     try:
+    #         # Get list of tickers to subscribe to
+    #         tickers = list(self.watchlist)
+    #
+    #         # Create simple subscription message - no need for "ticker/" prefix
+    #         subscribe_msg = {
+    #             "subscribe": tickers
+    #         }
+    #
+    #         logger.info(f"Subscribing to {len(tickers)} ticker channels")
+    #         self.ws.send(json.dumps(subscribe_msg))
+    #
+    #     except Exception as e:
+    #         logger.error(f"Error subscribing to watchlist: {e}")
 
     def add_stock(self, ticker_symbol):
         """Add a stock to the watchlist and persist to database."""
