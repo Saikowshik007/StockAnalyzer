@@ -295,19 +295,14 @@ class TelegramBot:
         if not context.args:
             await update.message.reply_text("Please provide a ticker symbol: /price AAPL")
             return
-
         ticker = context.args[0].upper()
-
         # Get multi-timeframe data
         all_prices = self.stock_collector.get_latest_prices()
-
         if ticker not in all_prices or not all_prices[ticker]:
             await update.message.reply_text(f"No price data available for {ticker}. You might need to add it to your watchlist first.")
             return
-
         ticker_data = all_prices[ticker]
         message = f"💰 *{self.escape_markdown(ticker)} Multi-Timeframe Analysis*\n\n"
-
         # Format each timeframe
         timeframe_names = {
             'long_term': '📅 Hourly',
@@ -315,19 +310,35 @@ class TelegramBot:
             'short_term': '⏱️ 5 minute',
             "very_short_term": '⏱️ 2 minute'
         }
-
         for timeframe, price_info in ticker_data.items():
             display_name = timeframe_names.get(timeframe, timeframe)
             message += f"{self.escape_markdown(display_name)}:\n"
-            # Fixed lines with nested dictionary access in f-strings
-            message += f"  Price: ${self.escape_markdown(f'{price_info.get(\"price\", 0):.2f}')}\n"
-            message += f"  Open: {self.escape_markdown(f'{price_info.get(\"open\", 0):,}')}\n"
-            message += f"  High: {self.escape_markdown(f'{price_info.get(\"high\", 0):,}')}\n"
-            message += f"  Low: {self.escape_markdown(f'{price_info.get(\"low\", 0):,}')}\n"
-            message += f"  Volume: {self.escape_markdown(f'{price_info.get(\"volume\", 0):,}')}\n"
-            message += f"  Time: {self.escape_markdown(price_info.get(\"datetime\").strftime('%Y-%m-%d %H:%M'))}\n\n"
-    
-            # Get technical indicators for each timeframe
+
+            # Extract values safely before formatting
+            price_val = price_info.get('price', 0)
+            open_val = price_info.get('open', 0)
+            high_val = price_info.get('high', 0)
+            low_val = price_info.get('low', 0)
+            volume_val = price_info.get('volume', 0)
+            datetime_val = price_info.get('datetime')
+
+            # Format values first, then use them in f-strings
+            price_str = f'{price_val:.2f}'
+            open_str = f'{open_val:,}'
+            high_str = f'{high_val:,}'
+            low_str = f'{low_val:,}'
+            volume_str = f'{volume_val:,}'
+            time_str = datetime_val.strftime('%Y-%m-%d %H:%M') if datetime_val else 'N/A'
+
+            # Add formatted values to message
+            message += f"  Price: ${self.escape_markdown(price_str)}\n"
+            message += f"  Open: {self.escape_markdown(open_str)}\n"
+            message += f"  High: {self.escape_markdown(high_str)}\n"
+            message += f"  Low: {self.escape_markdown(low_str)}\n"
+            message += f"  Volume: {self.escape_markdown(volume_str)}\n"
+            message += f"  Time: {self.escape_markdown(time_str)}\n\n"
+
+        # Get technical indicators for each timeframe
         try:
             summary = self.stock_collector.get_summary(ticker)
             if 'timeframes' in summary:
@@ -341,18 +352,21 @@ class TelegramBot:
                         # Handle RSI
                         rsi = indicators.get('rsi')
                         if rsi is not None and isinstance(rsi, (int, float)):
-                            message += f"  RSI: {self.escape_markdown(f'{rsi:.1f}')}\n"
+                            rsi_str = f'{rsi:.1f}'
+                            message += f"  RSI: {self.escape_markdown(rsi_str)}\n"
                         else:
                             message += f"  RSI: {self.escape_markdown(str(rsi))}\n"
 
                         # Handle MA Trend
                         ma_trend = indicators.get('ma_trend', 'N/A')
-                        message += f"  MA Trend: {self.escape_markdown(ma_trend.upper() if isinstance(ma_trend, str) else str(ma_trend))}\n"
+                        ma_str = ma_trend.upper() if isinstance(ma_trend, str) else str(ma_trend)
+                        message += f"  MA Trend: {self.escape_markdown(ma_str)}\n"
 
                         # Handle Volume Ratio
                         vol_ratio = indicators.get('volume_ratio')
                         if vol_ratio is not None and isinstance(vol_ratio, (int, float)):
-                            message += f"  Volume Ratio: {self.escape_markdown(f'{vol_ratio:.2f}')}x\n\n"
+                            vol_str = f'{vol_ratio:.2f}x'
+                            message += f"  Volume Ratio: {self.escape_markdown(vol_str)}\n\n"
                         else:
                             message += f"  Volume Ratio: {self.escape_markdown(str(vol_ratio))}\n\n"
         except Exception as e:
