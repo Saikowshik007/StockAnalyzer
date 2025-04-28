@@ -156,7 +156,7 @@ class YahooMultiStockCollector:
                 self.live_ticker_running = True
 
                 # Define callback for real-time data
-                def on_ticker_data(ws, data):
+                def on_new_msg(ws, data):
                     try:
                         # Extract relevant data from the ticker update
                         ticker_symbol = data.get('id', '').split('.')[0]
@@ -208,7 +208,8 @@ class YahooMultiStockCollector:
                         logger.error(f"Error processing ticker data: {e}")
 
                 # Start the YLiveTicker with our watchlist
-                YLiveTicker(on_ticker_data=on_ticker_data, symbols=list(self.watchlist))
+                # Using the correct parameter name 'on_ticker' instead of 'on_ticker_data'
+                YLiveTicker(on_ticker=on_new_msg, ticker_names=list(self.watchlist))
 
                 # YLiveTicker runs in its own event loop, so this code is only reached if it stops
                 logger.warning("YLiveTicker connection closed. Reconnecting in 5 seconds...")
