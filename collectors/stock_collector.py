@@ -140,7 +140,7 @@ class YahooMultiStockCollector:
             self.socket_id = f"websocket_{int(time.time() * 1000)}"
 
             # Subscribe to watchlist tickers
-            # self._subscribe_watchlist()
+            self._subscribe_watchlist()
 
         def on_message(ws, message):
             # Add message to queue for processing
@@ -202,12 +202,13 @@ class YahooMultiStockCollector:
                 # Check if we need to resubscribe
                 if self.ws_connected and not self._check_subscriptions():
                     logger.info("Resubscribing to watchlist tickers")
-                    # self._subscribe_watchlist()
+                    self._subscribe_watchlist()
 
                 # Ping to keep connection alive
                 try:
                     if self.ws_connected:
-                        self.ws.send('ping')
+                        # self.ws.send('ping')
+                        logger.info("Connected")
                 except Exception as e:
                     logger.error(f"Error sending ping: {e}")
                     self.ws_connected = False
