@@ -588,53 +588,84 @@ class TelegramBot:
             else:
                 await query.edit_message_text(f"Failed to remove {ticker}")
 
+            self.application = Application.builder().token(self.token).build()
+
+
     async def run_async(self):
         """Run the bot in an existing event loop."""
         try:
-            # Build the application with explicit request parameters
-            self.application = (
-                Application.builder()
-                .token(self.token)
-                .build()
-            )
+            # Build the application
+            self.application = Application.builder().token(self.token).build()
 
-            # Add your handlers here
-            # [... your existing handler code ...]
+            # Add handlers
+            self.application.add_handler(CommandHandler("start", self.start))
+            self.application.add_handler(CommandHandler("help", self.start))
+            self.application.add_handler(CommandHandler("watchlist", self.watchlist))
+            self.application.add_handler(CommandHandler("add", self.add_stock))
+            self.application.add_handler(CommandHandler("remove", self.remove_stock))
+            self.application.add_handler(CommandHandler("price", self.price))
+            self.application.add_handler(CommandHandler("history", self.history))
+            self.application.add_handler(CommandHandler("pattern", self.check_pattern))
+            self.application.add_handler(CommandHandler("latest", self.latest_news))
+            self.application.add_handler(CommandHandler("stats", self.stats))
 
-            # Set up logging
-            logger.info("Initializing Telegram bot application")
+            # Add new sentiment-related commands
+            self.application.add_handler(CommandHandler("sentiment", self.sentiment))
+            self.application.add_handler(CommandHandler("tickersentiment", self.ticker_sentiment))
+            self.application.add_handler(CommandHandler("analyze", self.analyze))
+
+            self.application.add_handler(CallbackQueryHandler(self.button_callback))
 
             # Initialize the application
+            logger.info("Initializing Telegram bot application")
             await self.application.initialize()
             await self.application.start()
 
-            # Use explicit parameters for updater
-            logger.info("Starting telegram polling with explicit parameters")
+            logger.info("Starting telegram polling with enhanced debugging")
 
-            # Instead of using start_polling, implement a manual polling loop
+            # Enhanced debugging for update processing
             update_offset = 0
 
             while True:
                 try:
-                    logger.info(f"Polling for updates with offset {update_offset}")
-                    # Get updates manually using the bot's getUpdates method
+                    # Get updates manually
                     updates = await self.application.bot.get_updates(
                         offset=update_offset,
-                        timeout=30,  # Long polling timeout
-                        allowed_updates=None  # Get all update types
+                        timeout=30
                     )
 
                     logger.info(f"Received {len(updates)} updates")
 
                     if updates:
-                        # Process each update
                         for update in updates:
-                            # Process update
-                            await self.application.process_update(update)
-                            # Update the offset to acknowledge this update
+                            # Detailed logging about the update
+                            if update.message:
+                                logger.info(f"Message update: ID={update.update_id}, text='{update.message.text}'")
+                                if update.message.text.startswith('/'):
+                                    logger.info(f"Command detected: {update.message.text}")
+
+                                    # Try to manually match the command
+                                    command = update.message.text.split()[0].lower()
+                                    if command == '/start' or command == '/help':
+                                        logger.info("Manually processing /start command")
+                                        await self.start(update, None)
+                                    elif command == '/watchlist':
+                                        logger.info("Manually processing /watchlist command")
+                                        await self.watchlist(update, None)
+                                    # Add other commands as needed
+
+                            elif update.callback_query:
+                                logger.info(f"Callback query: ID={update.update_id}, data='{update.callback_query.data}'")
+
+                            # Still try the regular processing too
+                            try:
+                                await self.application.process_update(update)
+                            except Exception as e:
+                                logger.error(f"Error in application.process_update: {e}", exc_info=True)
+
+                            # Update the offset
                             update_offset = update.update_id + 1
 
-                    # Small delay between polling cycles
                     await asyncio.sleep(0.1)
 
                 except asyncio.CancelledError:
@@ -642,11 +673,8 @@ class TelegramBot:
                     raise
                 except Exception as e:
                     logger.error(f"Error in polling loop: {e}", exc_info=True)
-                    # Short delay before retrying
                     await asyncio.sleep(5)
 
-        except asyncio.CancelledError:
-            logger.info("Bot task cancelled, shutting down...")
         except Exception as e:
             logger.error(f"Error in bot async run: {e}", exc_info=True)
             raise
@@ -656,7 +684,6 @@ class TelegramBot:
                 logger.info("Shutting down Telegram bot")
                 await self.application.stop()
                 await self.application.shutdown()
-                logger.info("Telegram bot shutdown complete")
             except Exception as e:
                 logger.error(f"Error during bot shutdown: {e}", exc_info=True)
 
