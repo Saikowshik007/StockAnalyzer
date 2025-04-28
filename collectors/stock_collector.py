@@ -149,84 +149,94 @@ class YahooMultiStockCollector:
             time.sleep(10)
 
     def _start_live_ticker(self):
-        """Start the YLiveTicker real-time data feed."""
-        while True:
-            try:
-                logger.info("Starting YLiveTicker connection...")
-                self.live_ticker_running = True
+        """Start the YLiveTicker real-time data feed in a dedicated thread."""
 
-                # Define callback for real-time data with minimal lock time
-                def on_new_msg(ws, data):
-                    try:
-                        # Extract data outside lock
-                        ticker_symbol = data.get('id', '').split('.')[0]
+        def websocket_thread():
+            """Inner function to run the WebSocket in its own thread."""
+            while self.live_ticker_running:
+                try:
+                    logger.info("Starting YLiveTicker connection...")
 
-                        # Skip if not in our watchlist (make a copy to avoid lock)
-                        watchlist_copy = set()
-                        with self.lock:
-                            watchlist_copy = set(self.watchlist)
+                    # Define callback for real-time data
+                    def on_new_msg(ws, data):
+                        try:
+                            # Extract relevant data from the ticker update
+                            ticker_symbol = data.get('id', '').split('.')[0]
 
-                        if ticker_symbol not in watchlist_copy:
-                            return
+                            # Skip if not in our watchlist (check without lock)
+                            if ticker_symbol not in self.watchlist:
+                                return
 
-                        # Extract price data
-                        price_data = data.get('price', {})
-                        if not price_data:
-                            return
+                            # Extract price data
+                            price_data = data.get('price', {})
+                            if not price_data:
+                                return
 
-                        timestamp = datetime.now(pytz.UTC)
+                            timestamp = datetime.now(pytz.UTC)
 
-                        # Prepare data outside the lock
-                        quote_data = {
-                            'datetime': timestamp,
-                            'price': price_data.get('regularMarketPrice', None),
-                            'volume': price_data.get('regularMarketVolume', 0),
-                            'high': price_data.get('regularMarketDayHigh', None),
-                            'low': price_data.get('regularMarketDayLow', None),
-                            'open': price_data.get('regularMarketOpen', None),
-                            'timestamp': timestamp
-                        }
+                            # Prepare data objects
+                            quote_data = {
+                                'datetime': timestamp,
+                                'price': price_data.get('regularMarketPrice', None),
+                                'volume': price_data.get('regularMarketVolume', 0),
+                                'high': price_data.get('regularMarketDayHigh', None),
+                                'low': price_data.get('regularMarketDayLow', None),
+                                'open': price_data.get('regularMarketOpen', None),
+                                'timestamp': timestamp
+                            }
 
-                        tick = {
-                            'datetime': timestamp,
-                            'price': price_data.get('regularMarketPrice', None),
-                            'volume': price_data.get('regularMarketVolume', 0) / 100,
-                        }
+                            tick = {
+                                'datetime': timestamp,
+                                'price': price_data.get('regularMarketPrice', None),
+                                'volume': price_data.get('regularMarketVolume', 0) / 100,
+                            }
 
-                        # Minimize lock time - just update the collections
-                        with self.lock:
-                            # Quick update operations
-                            self.real_time_quotes[ticker_symbol] = quote_data
+                            # Update with minimal lock time
+                            with self.lock:
+                                self.real_time_quotes[ticker_symbol] = quote_data
 
-                            if ticker_symbol not in self.tick_data:
-                                self.tick_data[ticker_symbol] = []
+                                if ticker_symbol not in self.tick_data:
+                                    self.tick_data[ticker_symbol] = []
 
-                            self.tick_data[ticker_symbol].append(tick)
+                                self.tick_data[ticker_symbol].append(tick)
 
-                            # Limit size of tick data
-                            if len(self.tick_data[ticker_symbol]) > 10000:
-                                self.tick_data[ticker_symbol] = self.tick_data[ticker_symbol][-10000:]
+                                # Limit size of tick data
+                                if len(self.tick_data[ticker_symbol]) > 10000:
+                                    self.tick_data[ticker_symbol] = self.tick_data[ticker_symbol][-10000:]
 
-                    except Exception as e:
-                        logger.error(f"Error processing ticker data: {e}")
+                        except Exception as e:
+                            logger.error(f"Error processing ticker data: {e}")
 
-                # Copy watchlist outside lock to avoid deadlock
-                ticker_names = []
-                with self.lock:
-                    ticker_names = list(self.watchlist)
+                    # Get ticker list outside the lock
+                    ticker_names = []
+                    with self.lock:
+                        ticker_names = list(self.watchlist)
 
-                # Start the YLiveTicker with our watchlist
-                YLiveTicker(on_ticker=on_new_msg, ticker_names=ticker_names)
+                    # Create a new YLiveTicker instance
+                    ticker = YLiveTicker(on_ticker=on_new_msg, ticker_names=ticker_names)
 
-                # YLiveTicker runs in its own event loop, so this code is only reached if it stops
-                logger.warning("YLiveTicker connection closed. Reconnecting in 5 seconds...")
-                self.live_ticker_running = False
-                time.sleep(5)
+                    # The YLiveTicker constructor starts the WebSocket connection and blocks
+                    # until it's terminated. When it returns, we'll restart if needed.
+                    logger.warning("YLiveTicker connection closed")
 
-            except Exception as e:
-                logger.error(f"Error in YLiveTicker connection: {e}")
-                self.live_ticker_running = False
-                time.sleep(5)  # Wait before retry
+                except Exception as e:
+                    logger.error(f"Error in YLiveTicker connection: {e}")
+
+                # Only try to reconnect if we're still meant to be running
+                if self.live_ticker_running:
+                    logger.info("Reconnecting in 5 seconds...")
+                    time.sleep(5)
+
+        # Start the thread
+        self.live_ticker_running = True
+        websocket_thread = threading.Thread(target=websocket_thread)
+        websocket_thread.daemon = True
+        websocket_thread.start()
+
+        # Store the thread for potential cleanup
+        self.websocket_thread = websocket_thread
+
+        logger.info("YLiveTicker thread started")
 
     def _aggregate_real_time_bars(self):
         """Aggregate tick data into real-time bars of various timeframes."""
