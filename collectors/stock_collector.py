@@ -140,7 +140,7 @@ class YahooMultiStockCollector:
             self.socket_id = f"websocket_{int(time.time() * 1000)}"
 
             # Subscribe to watchlist tickers
-            # self._subscribe_watchlist()
+            self._subscribe_watchlist()
 
         def on_message(ws, message):
             # Add message to queue for processing
@@ -202,7 +202,7 @@ class YahooMultiStockCollector:
                 # Check if we need to resubscribe
                 if self.ws_connected and not self._check_subscriptions():
                     logger.info("Resubscribing to watchlist tickers")
-                    # self._subscribe_watchlist()
+                    self._subscribe_watchlist()
 
                 # Ping to keep connection alive
                 try:
@@ -447,26 +447,26 @@ class YahooMultiStockCollector:
             self.request_count += 1
             return 0
 
-    # def _subscribe_watchlist(self):
-    #     """Subscribe to all tickers in watchlist."""
-    #     if not self.ws_connected or not self.watchlist:
-    #         logger.warning("Cannot subscribe: not connected or empty watchlist")
-    #         return
-    #
-    #     try:
-    #         # Get list of tickers to subscribe to
-    #         tickers = list(self.watchlist)
-    #
-    #         # Create simple subscription message - no need for "ticker/" prefix
-    #         subscribe_msg = {
-    #             "subscribe": tickers
-    #         }
-    #
-    #         logger.info(f"Subscribing to {len(tickers)} ticker channels")
-    #         self.ws.send(json.dumps(subscribe_msg))
-    #
-    #     except Exception as e:
-    #         logger.error(f"Error subscribing to watchlist: {e}")
+    def _subscribe_watchlist(self):
+        """Subscribe to all tickers in watchlist."""
+        if not self.ws_connected or not self.watchlist:
+            logger.warning("Cannot subscribe: not connected or empty watchlist")
+            return
+
+        try:
+            # Get list of tickers to subscribe to
+            tickers = list(self.watchlist)
+
+            # Create simple subscription message - no need for "ticker/" prefix
+            subscribe_msg = {
+                "subscribe": tickers
+            }
+
+            logger.info(f"Subscribing to {len(tickers)} ticker channels")
+            self.ws.send(json.dumps(subscribe_msg))
+
+        except Exception as e:
+            logger.error(f"Error subscribing to watchlist: {e}")
 
     def add_stock(self, ticker_symbol):
         """Add a stock to the watchlist and persist to database."""
