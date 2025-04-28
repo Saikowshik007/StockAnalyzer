@@ -624,10 +624,13 @@ class TelegramBot:
             self.application.add_handler(CommandHandler("tickersentiment", self.ticker_sentiment))
             self.application.add_handler(CommandHandler("analyze", self.analyze))
             self.application.add_handler(CallbackQueryHandler(self.button_callback))
-            self.application.add_error_handler(self.error_handler)
-            self.application.add_handler(MessageHandler(filters.ALL, self.log_update), group=-999)
 
-
+            # Add a simple message handler for debugging
+            from telegram.ext import MessageHandler, filters
+            async def echo(update, context):
+                logger.info(f"Echo received: {update.message.text}")
+                await update.message.reply_text(f"You said: {update.message.text}")
+            self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
             # Initialize and start the application
             logger.info("Initializing Telegram bot application")
@@ -635,25 +638,22 @@ class TelegramBot:
             logger.info("Starting Telegram bot application")
             await self.application.start()
 
-            # Start polling with minimal parameters
+            # Start polling with proper configuration for continuous updates
             logger.info("Starting polling")
             await self.application.updater.start_polling(
-                poll_interval=0.5,
-                timeout=10,
-                bootstrap_retries=-1,
-                allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=False
+                drop_pending_updates=False,
+                allowed_updates=None,  # Allow all update types
+                timeout=30,  # Longer timeout for better reliability
+                poll_interval=0.5  # Poll every 0.5 seconds
             )
             logger.info("Polling started successfully")
 
-            # Keep the application running
+            # Keep the bot running
             while True:
-                await asyncio.sleep(60)  # Log every minute
-                logger.debug("Bot is still running")
+                # This keeps the task alive but doesn't block other async operations
+                await asyncio.sleep(10)
+                logger.info("Bot is still running...")
 
-        except asyncio.CancelledError:
-            logger.info("Bot task cancelled, shutting down...")
-            raise
         except Exception as e:
             logger.error(f"Error in bot async run: {e}", exc_info=True)
             raise

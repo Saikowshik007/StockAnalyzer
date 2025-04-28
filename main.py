@@ -200,20 +200,20 @@ class FinancialMonitorApp:
             self.db_manager.backup_database()
 
             # Connect to Yahoo WebSocket first
-            self.run_stock_collector()
-            logger.info("Yahoo Finance WebSocket connection initialized")
-
-            # Start stock data saver in a separate thread
-            saver_thread = threading.Thread(target=self.run_stock_data_saver, daemon=True)
-            saver_thread.start()
-
-            # Start pattern monitor in a separate thread
-            pattern_thread = threading.Thread(target=self.run_pattern_monitor, daemon=True)
-            pattern_thread.start()
-
-            # Start sentiment tracker in a separate thread
-            sentiment_thread = threading.Thread(target=self.run_sentiment_tracker, daemon=True)
-            sentiment_thread.start()
+            # self.run_stock_collector()
+            # logger.info("Yahoo Finance WebSocket connection initialized")
+            #
+            # # Start stock data saver in a separate thread
+            # saver_thread = threading.Thread(target=self.run_stock_data_saver, daemon=True)
+            # saver_thread.start()
+            #
+            # # Start pattern monitor in a separate thread
+            # pattern_thread = threading.Thread(target=self.run_pattern_monitor, daemon=True)
+            # pattern_thread.start()
+            #
+            # # Start sentiment tracker in a separate thread
+            # sentiment_thread = threading.Thread(target=self.run_sentiment_tracker, daemon=True)
+            # sentiment_thread.start()
 
             # Create tasks for async components
             news_task = asyncio.create_task(self.news_monitor.monitor())
