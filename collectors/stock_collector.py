@@ -388,14 +388,18 @@ class YahooMultiStockCollector:
 
     def _update_derived_timeframes(self, ticker):
         """Derive higher timeframes from base timeframe data."""
-        if ticker not in self.stock_data or self.base_timeframe not in self.stock_data[ticker]:
-            return
+        # Get a copy of the base data with minimal lock time
+        base_data = None
+        with self.lock:
+            if ticker not in self.stock_data or self.base_timeframe not in self.stock_data[ticker]:
+                return
+            base_data = self.stock_data[ticker][self.base_timeframe].copy()
 
-        base_data = self.stock_data[ticker][self.base_timeframe]
         if base_data.empty:
             return
 
-        # Process each timeframe
+        # Process each timeframe outside the lock
+        derived_data_map = {}
         for tf_name, tf_config in self.timeframes.items():
             interval = tf_config['interval']
 
@@ -405,14 +409,16 @@ class YahooMultiStockCollector:
 
             # For lower timeframes than base, fetch directly instead of deriving
             if self.interval_to_minutes.get(interval, 0) < self.interval_to_minutes.get(self.base_timeframe, 0):
-                # Only fetch if we need this timeframe
                 continue
 
-            # Derive higher timeframe data
+            # Derive higher timeframe data without locks
             derived_data = self._aggregate_timeframe(base_data, interval)
+            derived_data_map[tf_name] = derived_data
 
-            # Store derived data
-            self.stock_data[ticker][tf_name] = derived_data
+        # Update with minimal lock time
+        with self.lock:
+            for tf_name, derived_data in derived_data_map.items():
+                self.stock_data[ticker][tf_name] = derived_data
 
     def _aggregate_timeframe(self, base_data, target_interval):
         """Aggregate lower timeframe data to higher timeframe."""
@@ -453,20 +459,31 @@ class YahooMultiStockCollector:
 
     def add_stock(self, ticker_symbol):
         """Add a stock to the watchlist and persist to database."""
-        # Validate ticker symbol before adding
+        # Validate ticker symbol before adding - do this outside any locks
         if not self._validate_ticker(ticker_symbol):
             logger.warning(f"Invalid ticker symbol: {ticker_symbol}")
             return False
 
-        if ticker_symbol not in self.watchlist:
-            self.watchlist.add(ticker_symbol)
-            # Also add to database if db_manager is available
-            if self.db_manager:
-                self.db_manager.add_to_watchlist(ticker_symbol)
-            # Initialize historical data for this ticker
+        # First check if the ticker is already in our watchlist
+        ticker_added = False
+        should_initialize = False
+
+        # Use a minimal lock to update the watchlist
+        with self.lock:
+            if ticker_symbol not in self.watchlist:
+                self.watchlist.add(ticker_symbol)
+                ticker_added = True
+                should_initialize = True
+
+        # Do database operations outside the lock
+        if ticker_added and self.db_manager:
+            self.db_manager.add_to_watchlist(ticker_symbol)
+
+        # Initialize historical data outside the lock
+        if should_initialize:
             self._initialize_ticker_data(ticker_symbol)
 
-            # Restart YLiveTicker to include new symbol
+            # Signal ticker restart without holding a lock
             self._restart_live_ticker()
 
             logger.info(f"Added {ticker_symbol} to watchlist")
@@ -477,7 +494,7 @@ class YahooMultiStockCollector:
 
     def _restart_live_ticker(self):
         """Restart the YLiveTicker connection with updated watchlist."""
-        # This will be picked up by the live_ticker_thread's reconnection logic
+        # No locks needed here - just setting a flag
         self.live_ticker_running = False
         logger.info("Signaled YLiveTicker to restart with updated watchlist")
 
@@ -496,36 +513,29 @@ class YahooMultiStockCollector:
 
     def _initialize_ticker_data(self, ticker_symbol):
         """Initialize historical data for a ticker symbol using yfinance."""
-        # Determine how much data we need based on the longest timeframe
-        max_minutes = max(self.interval_to_minutes.get(tf_config['interval'], 1)
-                          for tf_config in self.timeframes.values())
-
-        # Calculate how many days of data we need
-        bars_needed = max_minutes * 100  # Get enough bars for indicators
-        days_back = max(1, int(bars_needed / (6.5 * 60)))  # Trading hours per day
-
-        # Limit days_back to 7 days to avoid API limits
-        days_back = min(7, days_back)
-
         try:
-            # Use yfinance to get historical data with chunking for 1m data
+            # Determine how much data we need - do this outside any locks
+            max_minutes = max(self.interval_to_minutes.get(tf_config['interval'], 1)
+                              for tf_config in self.timeframes.values())
+
+            # Calculate how many days of data we need
+            bars_needed = max_minutes * 100  # Get enough bars for indicators
+            days_back = max(1, int(bars_needed / (6.5 * 60)))  # Trading hours per day
+            days_back = min(7, days_back)  # Limit to 7 days
+
+            # Fetch data outside any locks
+            data = None
             if self.base_timeframe == '1m':
-                # For 1m data, we need to chunk the requests to avoid API limits
                 data = self._fetch_chunked_historical_data(
-                    ticker_symbol,
-                    days_back=days_back,
-                    interval=self.base_timeframe
+                    ticker_symbol, days_back=days_back, interval=self.base_timeframe
                 )
             else:
-                # For other timeframes, we can use a single request
                 data = self._fetch_yfinance_historical_data(
-                    ticker_symbol,
-                    period=f"{days_back+1}d",  # Add extra day for safety
-                    interval=self.base_timeframe
+                    ticker_symbol, period=f"{days_back+1}d", interval=self.base_timeframe
                 )
 
+            # Only lock when updating the internal data structures
             if data is not None and not data.empty:
-                # Store in our data structure
                 with self.lock:
                     if ticker_symbol not in self.stock_data:
                         self.stock_data[ticker_symbol] = {}
@@ -533,8 +543,8 @@ class YahooMultiStockCollector:
                     # Store base timeframe data
                     self.stock_data[ticker_symbol][self.base_timeframe] = data
 
-                    # Derive all other timeframes
-                    self._update_derived_timeframes(ticker_symbol)
+                # Update derived timeframes with minimal locking
+                self._update_derived_timeframes(ticker_symbol)
             else:
                 logger.warning(f"No data available for {ticker_symbol}")
 
