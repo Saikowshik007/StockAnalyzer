@@ -92,25 +92,26 @@ class FinancialMonitorApp:
 
     def run_stock_collector(self):
         """Run the stock collector."""
-        try:
-            # Run in a completely separate thread with clear isolation
-            collector_thread = threading.Thread(
-                target=self._start_stock_collector_with_new_loop,
-                daemon=True
-            )
-            collector_thread.start()
-
-            # Wait for connection to be established (with timeout)
-            start_time = time.time()
-            while not self.stock_collector.connected and time.time() - start_time < 30:
-                time.sleep(0.1)
-
-            if not self.stock_collector.connected:
-                logger.warning("WebSocket connection not established after timeout. Bot may have issues.")
-            else:
-                logger.info("Stock collector WebSocket connected successfully")
-        except Exception as e:
-            logger.error(f"Error running stock collector: {e}")
+        # try:
+        #     # Run in a completely separate thread with clear isolation
+        #     collector_thread = threading.Thread(
+        #         target=self._start_stock_collector_with_new_loop,
+        #         daemon=True
+        #     )
+        #     collector_thread.start()
+        #
+        #     # Wait for connection to be established (with timeout)
+        #     start_time = time.time()
+        #     while not self.stock_collector.connected and time.time() - start_time < 30:
+        #         time.sleep(0.1)
+        #
+        #     if not self.stock_collector.connected:
+        #         logger.warning("WebSocket connection not established after timeout. Bot may have issues.")
+        #     else:
+        #         logger.info("Stock collector WebSocket connected successfully")
+        # except Exception as e:
+        #     logger.error(f"Error running stock collector: {e}")
+        pass
 
     def _start_stock_collector_with_new_loop(self):
         """Start stock collector with a dedicated event loop in a separate thread."""
