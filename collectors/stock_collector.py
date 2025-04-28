@@ -140,7 +140,7 @@ class YahooMultiStockCollector:
             self.socket_id = f"websocket_{int(time.time() * 1000)}"
 
             # Subscribe to watchlist tickers
-            self._subscribe_watchlist()
+            # self._subscribe_watchlist()
 
         def on_message(ws, message):
             # Add message to queue for processing
@@ -472,11 +472,9 @@ class YahooMultiStockCollector:
         with self.lock:
             if ticker_symbol not in self.watchlist:
                 self.watchlist.add(ticker_symbol)
-
                 # Also add to database if db_manager is available
                 if self.db_manager:
                     self.db_manager.add_to_watchlist(ticker_symbol)
-
                 # Subscribe to the new ticker if websocket is connected
                 if self.ws_connected:
                     subscribe_msg = {
@@ -484,10 +482,8 @@ class YahooMultiStockCollector:
                     }
 
                     self.ws.send(json.dumps(subscribe_msg))
-
                 # Initialize historical data for this ticker
                 self._initialize_ticker_data(ticker_symbol)
-
                 logger.info(f"Added {ticker_symbol} to watchlist")
                 return True
             else:
