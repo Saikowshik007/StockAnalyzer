@@ -86,11 +86,6 @@ class YahooMultiStockCollector:
         self.cache_thread.daemon = True
         self.cache_thread.start()
 
-        # Connection monitoring thread
-        self.monitor_thread = threading.Thread(target=self._monitor_connection)
-        self.monitor_thread.daemon = True
-        self.monitor_thread.start()
-
     def _load_watchlist_from_db(self):
         """Load watchlist from database."""
         if self.db_manager:
@@ -184,7 +179,6 @@ class YahooMultiStockCollector:
         ))
         self.ws_thread.daemon = True
         self.ws_thread.start()
-
 
     def _check_subscriptions(self):
         """Check if we have active subscriptions."""
