@@ -208,7 +208,7 @@ class YahooMultiStockCollector:
                 # Ping to keep connection alive
                 try:
                     if self.ws_connected:
-                        self.ws.ping("keepalive")
+                        self.ws.send_ping("keepalive")
                 except Exception as e:
                     logger.error(f"Error sending ping: {e}")
                     self.ws_connected = False
