@@ -308,6 +308,8 @@ class TelegramBot:
         ticker_data = all_prices[ticker]
         message = f"💰 *{ticker} Multi-Timeframe Analysis*\n\n"
 
+        logger.info(ticker_data)
+
         # Format each timeframe
         timeframe_names = {
             'long_term': '📅 Hourly',
