@@ -16,3 +16,4 @@ sqlalchemy
 hf_xet
 websocket-client
 protobuf==3.20.*
+yliveticker
