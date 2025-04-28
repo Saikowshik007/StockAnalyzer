@@ -155,14 +155,18 @@ class YahooMultiStockCollector:
                 logger.info("Starting YLiveTicker connection...")
                 self.live_ticker_running = True
 
-                # Define callback for real-time data
+                # Define callback for real-time data with minimal lock time
                 def on_new_msg(ws, data):
                     try:
-                        # Extract relevant data from the ticker update
+                        # Extract data outside lock
                         ticker_symbol = data.get('id', '').split('.')[0]
 
-                        # Skip if not in our watchlist
-                        if ticker_symbol not in self.watchlist:
+                        # Skip if not in our watchlist (make a copy to avoid lock)
+                        watchlist_copy = set()
+                        with self.lock:
+                            watchlist_copy = set(self.watchlist)
+
+                        if ticker_symbol not in watchlist_copy:
                             return
 
                         # Extract price data
@@ -172,44 +176,47 @@ class YahooMultiStockCollector:
 
                         timestamp = datetime.now(pytz.UTC)
 
-                        # Store the real-time quote
-                        with self.lock:
-                            self.real_time_quotes[ticker_symbol] = {
-                                'datetime': timestamp,
-                                'price': price_data.get('regularMarketPrice', None),
-                                'volume': price_data.get('regularMarketVolume', 0),
-                                'high': price_data.get('regularMarketDayHigh', None),
-                                'low': price_data.get('regularMarketDayLow', None),
-                                'open': price_data.get('regularMarketOpen', None),
-                                'timestamp': timestamp
-                            }
+                        # Prepare data outside the lock
+                        quote_data = {
+                            'datetime': timestamp,
+                            'price': price_data.get('regularMarketPrice', None),
+                            'volume': price_data.get('regularMarketVolume', 0),
+                            'high': price_data.get('regularMarketDayHigh', None),
+                            'low': price_data.get('regularMarketDayLow', None),
+                            'open': price_data.get('regularMarketOpen', None),
+                            'timestamp': timestamp
+                        }
 
-                            # Also store in tick data for aggregation
+                        tick = {
+                            'datetime': timestamp,
+                            'price': price_data.get('regularMarketPrice', None),
+                            'volume': price_data.get('regularMarketVolume', 0) / 100,
+                        }
+
+                        # Minimize lock time - just update the collections
+                        with self.lock:
+                            # Quick update operations
+                            self.real_time_quotes[ticker_symbol] = quote_data
+
                             if ticker_symbol not in self.tick_data:
                                 self.tick_data[ticker_symbol] = []
 
-                            # Add tick data (limited to last 10,000 ticks to avoid memory issues)
-                            tick = {
-                                'datetime': timestamp,
-                                'price': price_data.get('regularMarketPrice', None),
-                                'volume': price_data.get('regularMarketVolume', 0) / 100,  # Approximate tick volume
-                            }
                             self.tick_data[ticker_symbol].append(tick)
 
                             # Limit size of tick data
                             if len(self.tick_data[ticker_symbol]) > 10000:
                                 self.tick_data[ticker_symbol] = self.tick_data[ticker_symbol][-10000:]
 
-                        # Debug log for first few updates
-                        if len(self.tick_data.get(ticker_symbol, [])) < 5:
-                            logger.debug(f"Real-time update for {ticker_symbol}: {price_data.get('regularMarketPrice')}")
-
                     except Exception as e:
                         logger.error(f"Error processing ticker data: {e}")
 
+                # Copy watchlist outside lock to avoid deadlock
+                ticker_names = []
+                with self.lock:
+                    ticker_names = list(self.watchlist)
+
                 # Start the YLiveTicker with our watchlist
-                # Using the correct parameter name 'on_ticker' instead of 'on_ticker_data'
-                YLiveTicker(on_ticker=on_new_msg, ticker_names=list(self.watchlist))
+                YLiveTicker(on_ticker=on_new_msg, ticker_names=ticker_names)
 
                 # YLiveTicker runs in its own event loop, so this code is only reached if it stops
                 logger.warning("YLiveTicker connection closed. Reconnecting in 5 seconds...")
@@ -227,17 +234,33 @@ class YahooMultiStockCollector:
             try:
                 current_time = datetime.now(pytz.UTC)
 
-                # For each ticker in our watchlist with tick data
-                for ticker in list(self.watchlist):
-                    if ticker not in self.tick_data or not self.tick_data[ticker]:
+                # Get copy of watchlist and tick data outside the lock
+                watchlist_copy = []
+                ticker_data_map = {}
+
+                with self.lock:
+                    watchlist_copy = list(self.watchlist)
+                    # Make deep copies of the tick data we need to process
+                    for ticker in watchlist_copy:
+                        if ticker in self.tick_data and self.tick_data[ticker]:
+                            ticker_data_map[ticker] = self.tick_data[ticker].copy()
+
+                # Process each ticker's data outside the lock
+                updates_to_apply = {}
+
+                for ticker in watchlist_copy:
+                    if ticker not in ticker_data_map:
                         continue
-                    ticks = self.tick_data[ticker]
+
+                    ticks = ticker_data_map[ticker]
 
                     # Skip if we don't have enough ticks
                     if len(ticks) < 2:
                         continue
 
-                    # Aggregate for each timeframe we care about
+                    # Prepare updates for each timeframe
+                    ticker_updates = {}
+
                     for tf_name, tf_config in self.timeframes.items():
                         interval = tf_config['interval']
                         minutes = self.interval_to_minutes.get(interval, 5)
@@ -275,35 +298,45 @@ class YahooMultiStockCollector:
                             'volume': sum(volumes)
                         }
 
-                        # Update our data structures
-                        if ticker not in self.stock_data:
-                            self.stock_data[ticker] = {}
+                        # Store the computed bar for this timeframe
+                        ticker_updates[tf_name] = bar
 
-                        if tf_name not in self.stock_data[ticker]:
-                            self.stock_data[ticker][tf_name] = pd.DataFrame(columns=[
-                                'datetime', 'open', 'high', 'low', 'close', 'volume'
-                            ])
+                    if ticker_updates:
+                        updates_to_apply[ticker] = ticker_updates
 
-                        # Check if we already have a bar for this timeframe and datetime
-                        df = self.stock_data[ticker][tf_name]
-                        existing_bar = df[df['datetime'] == bar['datetime']]
+                # Now apply all updates with minimal lock time
+                if updates_to_apply:
+                    with self.lock:
+                        for ticker, tf_updates in updates_to_apply.items():
+                            if ticker not in self.stock_data:
+                                self.stock_data[ticker] = {}
 
-                        if not existing_bar.empty:
-                            # Update existing bar
-                            idx = existing_bar.index[0]
-                            df.at[idx, 'high'] = max(df.at[idx, 'high'], bar['high'])
-                            df.at[idx, 'low'] = min(df.at[idx, 'low'], bar['low'])
-                            df.at[idx, 'close'] = bar['close']
-                            df.at[idx, 'volume'] += bar['volume']
-                        else:
-                            # Add new bar
-                            new_row = pd.DataFrame([bar])
-                            self.stock_data[ticker][tf_name] = pd.concat([df, new_row], ignore_index=True)
+                            for tf_name, bar in tf_updates.items():
+                                if tf_name not in self.stock_data[ticker]:
+                                    self.stock_data[ticker][tf_name] = pd.DataFrame(columns=[
+                                        'datetime', 'open', 'high', 'low', 'close', 'volume'
+                                    ])
 
-                        # Sort and limit size
-                        self.stock_data[ticker][tf_name] = self.stock_data[ticker][tf_name].sort_values('datetime')
-                        if len(self.stock_data[ticker][tf_name]) > 10000:
-                            self.stock_data[ticker][tf_name] = self.stock_data[ticker][tf_name].tail(10000)
+                                # Check if we already have a bar for this timeframe and datetime
+                                df = self.stock_data[ticker][tf_name]
+                                existing_bar = df[df['datetime'] == bar['datetime']]
+
+                                if not existing_bar.empty:
+                                    # Update existing bar
+                                    idx = existing_bar.index[0]
+                                    df.at[idx, 'high'] = max(df.at[idx, 'high'], bar['high'])
+                                    df.at[idx, 'low'] = min(df.at[idx, 'low'], bar['low'])
+                                    df.at[idx, 'close'] = bar['close']
+                                    df.at[idx, 'volume'] += bar['volume']
+                                else:
+                                    # Add new bar
+                                    new_row = pd.DataFrame([bar])
+                                    self.stock_data[ticker][tf_name] = pd.concat([df, new_row], ignore_index=True)
+
+                                # Sort and limit size
+                                self.stock_data[ticker][tf_name] = self.stock_data[ticker][tf_name].sort_values('datetime')
+                                if len(self.stock_data[ticker][tf_name]) > 10000:
+                                    self.stock_data[ticker][tf_name] = self.stock_data[ticker][tf_name].tail(10000)
 
             except Exception as e:
                 logger.error(f"Error in real-time bar aggregation: {e}")
