@@ -302,7 +302,7 @@ class TelegramBot:
             await update.message.reply_text(f"No price data available for {ticker}. You might need to add it to your watchlist first.")
             return
         ticker_data = all_prices[ticker]
-        message = f"💰 *{self.escape_markdown(ticker)} Multi-Timeframe Analysis*\n\n"
+        message = f"💰 *{self.escape_markdown(ticker)} Multi\\-Timeframe Analysis*\n\n"
         # Format each timeframe
         timeframe_names = {
             'long_term': '📅 Hourly',
@@ -322,21 +322,26 @@ class TelegramBot:
             volume_val = price_info.get('volume', 0)
             datetime_val = price_info.get('datetime')
 
-            # Format values first, then use them in f-strings
-            price_str = f'{price_val:.2f}'
-            open_str = f'{open_val:,}'
-            high_str = f'{high_val:,}'
-            low_str = f'{low_val:,}'
-            volume_str = f'{volume_val:,}'
-            time_str = datetime_val.strftime('%Y-%m-%d %H:%M') if datetime_val else 'N/A'
+            # Format values first, then escape markdown
+            price_str = self.escape_markdown(f'${price_val:.2f}')
+            open_str = self.escape_markdown(f'{open_val:,}')
+            high_str = self.escape_markdown(f'{high_val:,}')
+            low_str = self.escape_markdown(f'{low_val:,}')
+            volume_str = self.escape_markdown(f'{volume_val:,}')
+
+            # Ensure datetime is handled safely
+            if datetime_val:
+                time_str = self.escape_markdown(datetime_val.strftime('%Y-%m-%d %H:%M'))
+            else:
+                time_str = "N/A"
 
             # Add formatted values to message
-            message += f"  Price: ${self.escape_markdown(price_str)}\n"
-            message += f"  Open: {self.escape_markdown(open_str)}\n"
-            message += f"  High: {self.escape_markdown(high_str)}\n"
-            message += f"  Low: {self.escape_markdown(low_str)}\n"
-            message += f"  Volume: {self.escape_markdown(volume_str)}\n"
-            message += f"  Time: {self.escape_markdown(time_str)}\n\n"
+            message += f"  Price: {price_str}\n"
+            message += f"  Open: {open_str}\n"
+            message += f"  High: {high_str}\n"
+            message += f"  Low: {low_str}\n"
+            message += f"  Volume: {volume_str}\n"
+            message += f"  Time: {time_str}\n\n"
 
         # Get technical indicators for each timeframe
         try:
@@ -352,8 +357,8 @@ class TelegramBot:
                         # Handle RSI
                         rsi = indicators.get('rsi')
                         if rsi is not None and isinstance(rsi, (int, float)):
-                            rsi_str = f'{rsi:.1f}'
-                            message += f"  RSI: {self.escape_markdown(rsi_str)}\n"
+                            rsi_str = self.escape_markdown(f'{rsi:.1f}')
+                            message += f"  RSI: {rsi_str}\n"
                         else:
                             message += f"  RSI: {self.escape_markdown(str(rsi))}\n"
 
@@ -365,8 +370,8 @@ class TelegramBot:
                         # Handle Volume Ratio
                         vol_ratio = indicators.get('volume_ratio')
                         if vol_ratio is not None and isinstance(vol_ratio, (int, float)):
-                            vol_str = f'{vol_ratio:.2f}x'
-                            message += f"  Volume Ratio: {self.escape_markdown(vol_str)}\n\n"
+                            vol_str = self.escape_markdown(f'{vol_ratio:.2f}x')
+                            message += f"  Volume Ratio: {vol_str}\n\n"
                         else:
                             message += f"  Volume Ratio: {self.escape_markdown(str(vol_ratio))}\n\n"
         except Exception as e:
@@ -500,11 +505,14 @@ class TelegramBot:
         await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
 
     # Add this helper function to escape Markdown characters
-    def escape_markdown(self,text):
+    def escape_markdown(self, text):
         """
         Helper function to escape MarkdownV2 special characters.
         Must escape: _ * [ ] ( ) ~ ` > # + - = | { } . !
         """
+        if not isinstance(text, str):
+            text = str(text)
+
         escape_chars = r'_*[]()~`>#+-=|{}.!'
         return ''.join(f'\\{c}' if c in escape_chars else c for c in text)
     def _combine_timeframe_signals(self, signals):
