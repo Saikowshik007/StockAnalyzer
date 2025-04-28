@@ -641,10 +641,6 @@ class TelegramBot:
                 poll_interval=0.5,
                 timeout=10,
                 bootstrap_retries=-1,
-                read_timeout=15,
-                write_timeout=15,
-                connect_timeout=15,
-                pool_timeout=None,
                 allowed_updates=Update.ALL_TYPES,
                 drop_pending_updates=False
             )
