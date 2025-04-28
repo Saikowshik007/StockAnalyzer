@@ -939,8 +939,6 @@ class YahooMultiStockCollector:
         if self.processing_thread and self.processing_thread.is_alive():
             self.processing_thread.join(timeout=1)
 
-        if self.monitor_thread and self.monitor_thread.is_alive():
-            self.monitor_thread.join(timeout=1)
 
         logger.info("YahooMultiStockCollector closed successfully")
 
