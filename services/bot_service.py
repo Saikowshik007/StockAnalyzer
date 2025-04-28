@@ -591,49 +591,74 @@ class TelegramBot:
     async def run_async(self):
         """Run the bot in an existing event loop."""
         try:
-            self.application = Application.builder().token(self.token).build()
+            # Build the application with explicit request parameters
+            self.application = (
+                Application.builder()
+                .token(self.token)
+                .build()
+            )
 
-            # Add handlers
-            self.application.add_handler(CommandHandler("start", self.start))
-            self.application.add_handler(CommandHandler("help", self.start))
-            self.application.add_handler(CommandHandler("watchlist", self.watchlist))
-            self.application.add_handler(CommandHandler("add", self.add_stock))
-            self.application.add_handler(CommandHandler("remove", self.remove_stock))
-            self.application.add_handler(CommandHandler("price", self.price))
-            self.application.add_handler(CommandHandler("history", self.history))
-            self.application.add_handler(CommandHandler("pattern", self.check_pattern))
-            self.application.add_handler(CommandHandler("latest", self.latest_news))
-            self.application.add_handler(CommandHandler("stats", self.stats))
+            # Add your handlers here
+            # [... your existing handler code ...]
 
-            # Add new sentiment-related commands
-            self.application.add_handler(CommandHandler("sentiment", self.sentiment))
-            self.application.add_handler(CommandHandler("tickersentiment", self.ticker_sentiment))
-            self.application.add_handler(CommandHandler("analyze", self.analyze))
+            # Set up logging
+            logger.info("Initializing Telegram bot application")
 
-            self.application.add_handler(CallbackQueryHandler(self.button_callback))
-
-            # Initialize the application without running the loop
+            # Initialize the application
             await self.application.initialize()
             await self.application.start()
-            await self.application.updater.start_polling()
 
-            # Keep running indefinitely
+            # Use explicit parameters for updater
+            logger.info("Starting telegram polling with explicit parameters")
+
+            # Instead of using start_polling, implement a manual polling loop
+            update_offset = 0
+
+            while True:
+                try:
+                    logger.info(f"Polling for updates with offset {update_offset}")
+                    # Get updates manually using the bot's getUpdates method
+                    updates = await self.application.bot.get_updates(
+                        offset=update_offset,
+                        timeout=30,  # Long polling timeout
+                        allowed_updates=None  # Get all update types
+                    )
+
+                    logger.info(f"Received {len(updates)} updates")
+
+                    if updates:
+                        # Process each update
+                        for update in updates:
+                            # Process update
+                            await self.application.process_update(update)
+                            # Update the offset to acknowledge this update
+                            update_offset = update.update_id + 1
+
+                    # Small delay between polling cycles
+                    await asyncio.sleep(0.1)
+
+                except asyncio.CancelledError:
+                    logger.info("Polling loop cancelled")
+                    raise
+                except Exception as e:
+                    logger.error(f"Error in polling loop: {e}", exc_info=True)
+                    # Short delay before retrying
+                    await asyncio.sleep(5)
+
+        except asyncio.CancelledError:
+            logger.info("Bot task cancelled, shutting down...")
+        except Exception as e:
+            logger.error(f"Error in bot async run: {e}", exc_info=True)
+            raise
+        finally:
+            # Clean shutdown
             try:
-                while True:
-                    await asyncio.sleep(3600)  # Sleep for an hour
-            except asyncio.CancelledError:
-                logger.info("Bot task cancelled, shutting down...")
-                raise
-            finally:
-                # Clean shutdown
-                await self.application.updater.stop()
+                logger.info("Shutting down Telegram bot")
                 await self.application.stop()
                 await self.application.shutdown()
-
-        except Exception as e:
-            logger.error(f"Error in bot async run: {e}")
-            # Re-raise to let the main loop handle it
-            raise
+                logger.info("Telegram bot shutdown complete")
+            except Exception as e:
+                logger.error(f"Error during bot shutdown: {e}", exc_info=True)
 
 
     async def sentiment(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
