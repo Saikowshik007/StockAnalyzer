@@ -613,65 +613,55 @@ class TelegramBot:
             self.application.add_handler(CommandHandler("analyze", self.analyze))
             self.application.add_handler(CallbackQueryHandler(self.button_callback))
 
-            # Initialize the application
+            # Add error handler
+            async def error_handler(update, context):
+                logger.error(f"Update {update} caused error: {context.error}", exc_info=context.error)
+
+            self.application.add_error_handler(error_handler)
+
+            # Initialize and start the application
             logger.info("Initializing Telegram bot application")
             await self.application.initialize()
+            logger.info("Starting Telegram bot application")
             await self.application.start()
 
-            logger.info("Starting telegram polling")
+            # Start automatic polling with explicit parameters
+            logger.info("Starting automatic polling")
+            await self.application.updater.start_polling(
+                poll_interval=0.5,      # Check for updates every 0.5 seconds
+                timeout=10,             # Timeout for long polling
+                bootstrap_retries=5,    # Retry bootstrap a few times on failure
+                read_timeout=7,         # Shorter read timeout
+                write_timeout=7,        # Shorter write timeout
+                connect_timeout=7,      # Shorter connect timeout
+                pool_timeout=None       # No pool timeout
+            )
+            logger.info("Automatic polling started successfully")
 
-            # Manual polling loop without redundant processing
-            update_offset = 0
-
+            # Keep the application running
             while True:
-                try:
-                    # Get updates manually
-                    updates = await self.application.bot.get_updates(
-                        offset=update_offset,
-                        timeout=30
-                    )
+                await asyncio.sleep(60)  # Check every minute if we're still running
+                logger.debug("Bot is still running")
 
-                    logger.info(f"Received {len(updates)} updates")
-
-                    if updates:
-                        for update in updates:
-                            # Log update info
-                            if update.message and update.message.text:
-                                logger.info(f"Message update: ID={update.update_id}, text='{update.message.text}'")
-                            elif update.callback_query:
-                                logger.info(f"Callback query: ID={update.update_id}, data='{update.callback_query.data}'")
-
-                            # Process update ONLY ONCE through the application's handlers
-                            try:
-                                await self.application.process_update(update)
-                                logger.info(f"Processed update {update.update_id}")
-                            except Exception as e:
-                                logger.error(f"Error processing update {update.update_id}: {e}", exc_info=True)
-
-                            # Update offset
-                            update_offset = update.update_id + 1
-
-                    # Short delay between polling cycles
-                    await asyncio.sleep(0.1)
-
-                except asyncio.CancelledError:
-                    logger.info("Polling loop cancelled")
-                    raise
-                except Exception as e:
-                    logger.error(f"Error in polling loop: {e}", exc_info=True)
-                    await asyncio.sleep(5)
-
+        except asyncio.CancelledError:
+            logger.info("Bot task cancelled, shutting down...")
+            raise
         except Exception as e:
             logger.error(f"Error in bot async run: {e}", exc_info=True)
             raise
         finally:
             # Clean shutdown
+            logger.info("Starting bot shutdown sequence")
             try:
-                logger.info("Shutting down Telegram bot")
-                if hasattr(self, 'application'):
+                if hasattr(self, 'application') and self.application:
+                    if hasattr(self.application, 'updater') and self.application.updater:
+                        logger.info("Stopping updater...")
+                        await self.application.updater.stop()
+                    logger.info("Stopping application...")
                     await self.application.stop()
+                    logger.info("Shutting down application...")
                     await self.application.shutdown()
-                    logger.info("Telegram bot shutdown complete")
+                    logger.info("Bot shutdown complete")
             except Exception as e:
                 logger.error(f"Error during bot shutdown: {e}", exc_info=True)
 
