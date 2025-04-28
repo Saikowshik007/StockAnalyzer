@@ -92,10 +92,31 @@ class FinancialMonitorApp:
     def run_stock_collector(self):
         """Run the stock collector."""
         try:
-            # Connect to Yahoo WebSocket
-            self.stock_collector.connect_websocket()
+            # Run in a completely separate thread with clear isolation
+            collector_thread = threading.Thread(
+                target=self._start_stock_collector_with_new_loop,
+                daemon=True
+            )
+            collector_thread.start()
+            logger.info("Stock collector started in isolated thread")
         except Exception as e:
             logger.error(f"Error running stock collector: {e}")
+
+    def _start_stock_collector_with_new_loop(self):
+        """Start stock collector with a dedicated event loop in a separate thread."""
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        try:
+            # Connect to Yahoo WebSocket
+            self.stock_collector.connect_websocket()
+            # Run the loop until interrupted
+            loop.run_forever()
+        except Exception as e:
+            logger.error(f"Error in stock collector thread: {e}")
+        finally:
+            loop.close()
 
     def run_stock_data_saver(self):
         """Periodically save stock data to database for all timeframes."""
@@ -209,14 +230,19 @@ class FinancialMonitorApp:
         self.shutdown_event.set()
         self.news_monitor.stop()
 
-        # Close Yahoo WebSocket connection
+        # Close Yahoo WebSocket connection first
         if hasattr(self, 'stock_collector'):
+            logger.info("Closing Yahoo Finance WebSocket connection...")
             self.stock_collector.close()
             logger.info("Yahoo Finance WebSocket connection closed")
+
+        # Give the WebSocket time to fully disconnect before handling tasks
+        await asyncio.sleep(1)
 
         # Cancel all running tasks
         for task in self.tasks:
             if not task.done():
+                logger.info(f"Cancelling task: {task}")
                 task.cancel()
 
         # Wait for tasks to be cancelled
