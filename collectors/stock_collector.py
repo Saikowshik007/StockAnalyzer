@@ -178,43 +178,13 @@ class YahooMultiStockCollector:
         )
 
         # Start websocket in a separate thread
-        self.ws_thread = threading.Thread(target=self.ws.run_forever)
+        self.ws_thread = threading.Thread(target=lambda: self.ws.run_forever(
+            ping_interval=30,  # Send a ping every 30 seconds
+            ping_timeout=10    # Wait 10 seconds for pong before considering connection dead
+        ))
         self.ws_thread.daemon = True
         self.ws_thread.start()
 
-    def _monitor_connection(self):
-        """Monitor and maintain websocket connection."""
-        reconnect_delay = 5  # seconds
-        max_reconnect_delay = 300  # 5 minutes
-
-        while True:
-            if not self.ws_connected:
-                logger.info(f"Connection lost or not established. Reconnecting in {reconnect_delay} seconds...")
-                time.sleep(reconnect_delay)
-                try:
-                    self.connect_websocket()
-                    # Reset the reconnect delay upon successful connection
-                    reconnect_delay = 5
-                except Exception as e:
-                    logger.error(f"Failed to reconnect: {e}")
-                    # Exponential backoff, max 5 minutes
-                    reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
-            else:
-                # Check if we need to resubscribe
-                if self.ws_connected and not self._check_subscriptions():
-                    logger.info("Resubscribing to watchlist tickers")
-                    self._subscribe_watchlist()
-
-                # Ping to keep connection alive
-                try:
-                    if self.ws_connected:
-                        self.ws.send_ping("keepalive")
-                except Exception as e:
-                    logger.error(f"Error sending ping: {e}")
-                    self.ws_connected = False
-
-                # Wait before next check
-                time.sleep(30)
 
     def _check_subscriptions(self):
         """Check if we have active subscriptions."""
