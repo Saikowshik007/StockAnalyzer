@@ -306,8 +306,7 @@ class TelegramBot:
             return
 
         ticker_data = all_prices[ticker]
-        message = f"💰 *{ticker} Multi-Timeframe Analysis*\n\n"
-
+        message = f"💰 *{self.escape_markdown(ticker)} Multi-Timeframe Analysis*\n\n"
 
         # Format each timeframe
         timeframe_names = {
@@ -319,13 +318,13 @@ class TelegramBot:
 
         for timeframe, price_info in ticker_data.items():
             display_name = timeframe_names.get(timeframe, timeframe)
-            message += f"{display_name}:\n"
-            message += f"  Price: ${price_info['price']:.2f}\n"
-            message += f"  Open: {price_info['open']:,}\n"
-            message += f"  High: {price_info['high']:,}\n"
-            message += f"  Low: {price_info['low']:,}\n"
-            message += f"  Volume: {price_info['volume']:,}\n"
-            message += f"  Time: {price_info['datetime'].strftime('%Y-%m-%d %H:%M')}\n\n"
+            message += f"{self.escape_markdown(display_name)}:\n"
+            message += f"  Price: ${self.escape_markdown(f'{price_info['price']:.2f}')}\n"
+            message += f"  Open: {self.escape_markdown(f'{price_info['open']:,}')}\n"
+            message += f"  High: {self.escape_markdown(f'{price_info['high']:,}')}\n"
+            message += f"  Low: {self.escape_markdown(f'{price_info['low']:,}')}\n"
+            message += f"  Volume: {self.escape_markdown(f'{price_info['volume']:,}')}\n"
+            message += f"  Time: {self.escape_markdown(price_info['datetime'].strftime('%Y-%m-%d %H:%M'))}\n\n"
 
         # Get technical indicators for each timeframe
         try:
@@ -336,30 +335,32 @@ class TelegramBot:
                     if 'indicators' in tf_data:
                         display_name = timeframe_names.get(timeframe, timeframe)
                         indicators = tf_data['indicators']
-                        message += f"{display_name}:\n"
+                        message += f"{self.escape_markdown(display_name)}:\n"
 
-                        # Handle RSI - safely format only if it's a number
+                        # Handle RSI
                         rsi = indicators.get('rsi')
                         if rsi is not None and isinstance(rsi, (int, float)):
-                            message += f"  RSI: {rsi:.1f}\n"
+                            message += f"  RSI: {self.escape_markdown(f'{rsi:.1f}')}\n"
                         else:
-                            message += f"  RSI: {rsi}\n"
+                            message += f"  RSI: {self.escape_markdown(str(rsi))}\n"
 
                         # Handle MA Trend
                         ma_trend = indicators.get('ma_trend', 'N/A')
-                        message += f"  MA Trend: {ma_trend.upper() if isinstance(ma_trend, str) else ma_trend}\n"
+                        message += f"  MA Trend: {self.escape_markdown(ma_trend.upper() if isinstance(ma_trend, str) else str(ma_trend))}\n"
 
-                        # Handle Volume Ratio - safely format only if it's a number
+                        # Handle Volume Ratio
                         vol_ratio = indicators.get('volume_ratio')
                         if vol_ratio is not None and isinstance(vol_ratio, (int, float)):
-                            message += f"  Volume Ratio: {vol_ratio:.2f}x\n\n"
+                            message += f"  Volume Ratio: {self.escape_markdown(f'{vol_ratio:.2f}')}x\n\n"
                         else:
-                            message += f"  Volume Ratio: {vol_ratio}\n\n"
+                            message += f"  Volume Ratio: {self.escape_markdown(str(vol_ratio))}\n\n"
         except Exception as e:
             logger.error(f"Error getting technical indicators: {e}")
-        logger.info(message)
 
-        await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+        logger.info(message)
+        await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
+
+
 
     async def history(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /history <ticker> command."""
