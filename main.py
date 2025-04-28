@@ -169,7 +169,7 @@ class FinancialMonitorApp:
             self.db_manager.backup_database()
 
             # Connect to Yahoo WebSocket first
-            self.run_stock_collector()
+            # self.run_stock_collector()
             logger.info("Yahoo Finance WebSocket connection initialized")
 
             # Start stock data saver in a separate thread
