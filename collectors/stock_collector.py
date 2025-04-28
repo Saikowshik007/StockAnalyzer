@@ -735,59 +735,48 @@ class YahooMultiStockCollector:
         For real-time data, it prefers the latest real-time bars when available,
         then falls back to historical data from yfinance.
         """
-        # First check if we have real-time data for this ticker
+        # Check for cached real-time data first with minimal lock time
+        df_to_return = None
+        matching_tf = None
+
+        # Find the matching timeframe for this interval
+        for tf_name, tf_config in self.timeframes.items():
+            if tf_config['interval'] == interval:
+                matching_tf = tf_name
+                break
+
+        # Try to get data with minimal locking
         with self.lock:
-            # Check if we have real-time quotes
-            has_real_time = ticker_symbol in self.real_time_quotes
-
-            # Check if the requested interval matches one of our timeframes
-            matching_tf = None
-            for tf_name, tf_config in self.timeframes.items():
-                if tf_config['interval'] == interval:
-                    matching_tf = tf_name
-                    break
-
-            # If we have matching real-time data from our aggregated bars
+            # If we have the data already in our cache
             if matching_tf and ticker_symbol in self.stock_data and matching_tf in self.stock_data[ticker_symbol]:
-                # Use our real-time aggregated data
-                return self.stock_data[ticker_symbol][matching_tf].copy()
+                df_to_return = self.stock_data[ticker_symbol][matching_tf].copy()
+            elif interval == self.base_timeframe and ticker_symbol in self.stock_data and interval in self.stock_data[ticker_symbol]:
+                df_to_return = self.stock_data[ticker_symbol][interval].copy()
 
-        # If we don't have real-time data, fall back to yfinance historical data
-        # Validate interval
-        if interval not in self.interval_to_minutes:
-            logger.warning(f"Invalid interval: {interval}. Using {self.base_timeframe} instead.")
-            interval = self.base_timeframe
+        # If we found data in our cache, return it
+        if df_to_return is not None and not df_to_return.empty:
+            return df_to_return
 
-        with self.lock:
-            # Find the timeframe that matches this interval
-            matching_tf = None
-            for tf_name, tf_config in self.timeframes.items():
-                if tf_config['interval'] == interval:
-                    matching_tf = tf_name
-                    break
-
-            # Check if we have the exact timeframe data already
-            if matching_tf and ticker_symbol in self.stock_data and matching_tf in self.stock_data[ticker_symbol]:
-                return self.stock_data[ticker_symbol][matching_tf].copy()
-
-            # If requesting base timeframe data directly
-            if interval == self.base_timeframe and ticker_symbol in self.stock_data and interval in self.stock_data[ticker_symbol]:
-                return self.stock_data[ticker_symbol][interval].copy()
-
-            # For a timeframe that's higher than our base, derive it
-            if self.interval_to_minutes.get(interval, 0) >= self.interval_to_minutes.get(self.base_timeframe, 0):
+        # For derivable timeframes, try to derive from base data
+        if self.interval_to_minutes.get(interval, 0) >= self.interval_to_minutes.get(self.base_timeframe, 0):
+            base_data = None
+            with self.lock:
                 if ticker_symbol in self.stock_data and self.base_timeframe in self.stock_data[ticker_symbol]:
-                    base_data = self.stock_data[ticker_symbol][self.base_timeframe]
-                    if not base_data.empty:
-                        derived_data = self._aggregate_timeframe(base_data, interval)
+                    base_data = self.stock_data[ticker_symbol][self.base_timeframe].copy()
 
-                        # Cache this derived data for future use
-                        if matching_tf:
-                            self.stock_data[ticker_symbol][matching_tf] = derived_data
+            if base_data is not None and not base_data.empty:
+                derived_data = self._aggregate_timeframe(base_data, interval)
 
-                        return derived_data
+                # Cache the derived data for future use
+                if matching_tf:
+                    with self.lock:
+                        if ticker_symbol not in self.stock_data:
+                            self.stock_data[ticker_symbol] = {}
+                        self.stock_data[ticker_symbol][matching_tf] = derived_data
 
-        # If we need to fetch the data directly (either lower timeframe or missing data)
+                return derived_data
+
+        # If we get here, we need to fetch from yfinance
         # Determine appropriate period based on interval
         period = "5d"  # Default period
         if interval in ['1d', '5d', '1wk', '1mo']:
@@ -798,15 +787,11 @@ class YahooMultiStockCollector:
         # For 1m data, use chunked approach to avoid limits
         if interval == '1m':
             return self._fetch_chunked_historical_data(
-                ticker_symbol,
-                days_back=7,  # Yahoo's limit
-                interval=interval
+                ticker_symbol, days_back=7, interval=interval
             )
         else:
             return self._fetch_yfinance_historical_data(
-                ticker_symbol,
-                period=period,
-                interval=interval
+                ticker_symbol, period=period, interval=interval
             )
 
     def get_multi_timeframe_data(self, ticker_symbol):
@@ -947,29 +932,43 @@ class YahooMultiStockCollector:
         """Get the latest price for each stock in watchlist across all timeframes."""
         latest_prices = {}
 
-        for ticker in self.watchlist:
-            # First check if we have real-time data
-            with self.lock:
-                if ticker in self.real_time_quotes:
-                    rt_data = self.real_time_quotes[ticker]
-                    latest_prices[ticker] = {
-                        'real_time': {
-                            'datetime': rt_data.get('datetime'),
-                            'price': rt_data.get('price'),
-                            'open': rt_data.get('open'),
-                            'high': rt_data.get('high'),
-                            'low': rt_data.get('low'),
-                            'volume': rt_data.get('volume')
-                        }
-                    }
+        # Get a copy of the watchlist to avoid long lock times
+        watchlist_copy = []
+        with self.lock:
+            watchlist_copy = list(self.watchlist)
 
-                    # Also include data for all timeframes
+        # Process each ticker
+        for ticker in watchlist_copy:
+            ticker_data = {}
+            has_real_time = False
+            real_time_quote = None
+
+            # Check for real-time data with minimal lock time
+            with self.lock:
+                has_real_time = ticker in self.real_time_quotes
+                if has_real_time:
+                    real_time_quote = self.real_time_quotes[ticker].copy()
+
+            # If we have real-time data
+            if has_real_time and real_time_quote:
+                ticker_data['real_time'] = {
+                    'datetime': real_time_quote.get('datetime'),
+                    'price': real_time_quote.get('price'),
+                    'open': real_time_quote.get('open'),
+                    'high': real_time_quote.get('high'),
+                    'low': real_time_quote.get('low'),
+                    'volume': real_time_quote.get('volume')
+                }
+
+                # Get data for other timeframes
+                timeframe_data = {}
+                with self.lock:
                     for tf_name, tf_config in self.timeframes.items():
                         if ticker in self.stock_data and tf_name in self.stock_data[ticker]:
                             df = self.stock_data[ticker][tf_name]
                             if not df.empty:
                                 latest_row = df.iloc[-1]
-                                latest_prices[ticker][tf_name] = {
+                                timeframe_data[tf_name] = {
                                     'datetime': latest_row['datetime'],
                                     'open': latest_row['open'],
                                     'high': latest_row['high'],
@@ -977,58 +976,65 @@ class YahooMultiStockCollector:
                                     'price': latest_row['close'],
                                     'volume': latest_row['volume']
                                 }
-                else:
-                    # Fallback to yfinance if no real-time data
-                    try:
-                        ticker_obj = yf.Ticker(ticker)
-                        live_data = ticker_obj.history(period="1d", interval="1m").tail(1)
 
-                        if not live_data.empty:
-                            # Format the live data
-                            latest_row = live_data.iloc[0]
-                            live_price = {
-                                'datetime': live_data.index[0],
-                                'open': latest_row['Open'],
-                                'high': latest_row['High'],
-                                'low': latest_row['Low'],
-                                'price': latest_row['Close'],
-                                'volume': latest_row['Volume']
-                            }
+                # Add timeframe data
+                ticker_data.update(timeframe_data)
 
-                            latest_prices[ticker] = {'yfinance_live': live_price}
+            else:
+                # No real-time data, fall back to yfinance
+                try:
+                    ticker_obj = yf.Ticker(ticker)
+                    live_data = ticker_obj.history(period="1d", interval="1m").tail(1)
 
-                            # Also get data for all timeframes
-                            all_data = self.get_multi_timeframe_data(ticker)
-                            for timeframe, data in all_data.items():
-                                if not data.empty:
-                                    tf_latest_row = data.iloc[-1]
-                                    latest_prices[ticker][timeframe] = {
-                                        'datetime': tf_latest_row['datetime'],
-                                        'open': tf_latest_row['open'],
-                                        'high': tf_latest_row['high'],
-                                        'low': tf_latest_row['low'],
-                                        'price': tf_latest_row['close'],
-                                        'volume': tf_latest_row['volume']
-                                    }
-                    except Exception as e:
-                        logger.error(f"Error getting latest price for {ticker}: {e}")
-                        # Fallback to our stored data
+                    if not live_data.empty:
+                        # Format the live data
+                        latest_row = live_data.iloc[0]
+                        ticker_data['yfinance_live'] = {
+                            'datetime': live_data.index[0],
+                            'open': latest_row['Open'],
+                            'high': latest_row['High'],
+                            'low': latest_row['Low'],
+                            'price': latest_row['Close'],
+                            'volume': latest_row['Volume']
+                        }
+
+                        # Get data for all timeframes from our cache
                         all_data = self.get_multi_timeframe_data(ticker)
-                        ticker_prices = {}
                         for timeframe, data in all_data.items():
                             if not data.empty:
-                                latest_row = data.iloc[-1]
-                                ticker_prices[timeframe] = {
-                                    'datetime': latest_row['datetime'],
-                                    'open': latest_row['open'],
-                                    'high': latest_row['high'],
-                                    'low': latest_row['low'],
-                                    'price': latest_row['close'],
-                                    'volume': latest_row['volume']
+                                tf_latest_row = data.iloc[-1]
+                                ticker_data[timeframe] = {
+                                    'datetime': tf_latest_row['datetime'],
+                                    'open': tf_latest_row['open'],
+                                    'high': tf_latest_row['high'],
+                                    'low': tf_latest_row['low'],
+                                    'price': tf_latest_row['close'],
+                                    'volume': tf_latest_row['volume']
                                 }
+                except Exception as e:
+                    logger.error(f"Error getting latest price for {ticker}: {e}")
 
-                        if ticker_prices:
-                            latest_prices[ticker] = ticker_prices
+                    # Fallback to our stored data
+                    all_data = self.get_multi_timeframe_data(ticker)
+                    timeframe_data = {}
+                    for timeframe, data in all_data.items():
+                        if not data.empty:
+                            latest_row = data.iloc[-1]
+                            timeframe_data[timeframe] = {
+                                'datetime': latest_row['datetime'],
+                                'open': latest_row['open'],
+                                'high': latest_row['high'],
+                                'low': latest_row['low'],
+                                'price': latest_row['close'],
+                                'volume': latest_row['volume']
+                            }
+
+                    if timeframe_data:
+                        ticker_data = timeframe_data
+
+            # Add to results if we got data
+            if ticker_data:
+                latest_prices[ticker] = ticker_data
 
         return latest_prices
 
