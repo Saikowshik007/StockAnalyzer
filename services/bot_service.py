@@ -308,7 +308,6 @@ class TelegramBot:
         ticker_data = all_prices[ticker]
         message = f"💰 *{ticker} Multi-Timeframe Analysis*\n\n"
 
-        logger.info(ticker_data)
 
         # Format each timeframe
         timeframe_names = {
@@ -358,6 +357,7 @@ class TelegramBot:
                             message += f"  Volume Ratio: {vol_ratio}\n\n"
         except Exception as e:
             logger.error(f"Error getting technical indicators: {e}")
+        logger.info(message)
 
         await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
