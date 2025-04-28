@@ -613,11 +613,7 @@ class TelegramBot:
             self.application.add_handler(CallbackQueryHandler(self.button_callback))
 
             # Initialize the application without running the loop
-            await self.application.initialize()
-            await self.application.start()
-
-            # Start the updater
-            await self.application.updater.start_polling()
+            await self.application.run_polling()
 
             # Keep running indefinitely
             try:
