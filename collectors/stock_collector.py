@@ -231,81 +231,79 @@ class YahooMultiStockCollector:
                 for ticker in list(self.watchlist):
                     if ticker not in self.tick_data or not self.tick_data[ticker]:
                         continue
+                    ticks = self.tick_data[ticker]
 
-                    with self.lock:
-                        ticks = self.tick_data[ticker]
+                    # Skip if we don't have enough ticks
+                    if len(ticks) < 2:
+                        continue
 
-                        # Skip if we don't have enough ticks
-                        if len(ticks) < 2:
+                    # Aggregate for each timeframe we care about
+                    for tf_name, tf_config in self.timeframes.items():
+                        interval = tf_config['interval']
+                        minutes = self.interval_to_minutes.get(interval, 5)
+
+                        # Determine the start of the current bar period
+                        bar_start = current_time.replace(
+                            second=0, microsecond=0,
+                            minute=(current_time.minute // minutes) * minutes
+                        )
+
+                        # Get ticks that belong to the current bar
+                        current_bar_ticks = [
+                            t for t in ticks
+                            if t['datetime'] >= bar_start - timedelta(minutes=minutes) and
+                               t['datetime'] < bar_start
+                        ]
+
+                        # Skip if we don't have any ticks for this bar
+                        if not current_bar_ticks:
                             continue
 
-                        # Aggregate for each timeframe we care about
-                        for tf_name, tf_config in self.timeframes.items():
-                            interval = tf_config['interval']
-                            minutes = self.interval_to_minutes.get(interval, 5)
+                        # Create OHLCV bar
+                        prices = [t['price'] for t in current_bar_ticks if t['price'] is not None]
+                        volumes = [t['volume'] for t in current_bar_ticks if 'volume' in t]
 
-                            # Determine the start of the current bar period
-                            bar_start = current_time.replace(
-                                second=0, microsecond=0,
-                                minute=(current_time.minute // minutes) * minutes
-                            )
+                        if not prices:
+                            continue
 
-                            # Get ticks that belong to the current bar
-                            current_bar_ticks = [
-                                t for t in ticks
-                                if t['datetime'] >= bar_start - timedelta(minutes=minutes) and
-                                   t['datetime'] < bar_start
-                            ]
+                        bar = {
+                            'datetime': bar_start - timedelta(minutes=minutes),
+                            'open': prices[0],
+                            'high': max(prices),
+                            'low': min(prices),
+                            'close': prices[-1],
+                            'volume': sum(volumes)
+                        }
 
-                            # Skip if we don't have any ticks for this bar
-                            if not current_bar_ticks:
-                                continue
+                        # Update our data structures
+                        if ticker not in self.stock_data:
+                            self.stock_data[ticker] = {}
 
-                            # Create OHLCV bar
-                            prices = [t['price'] for t in current_bar_ticks if t['price'] is not None]
-                            volumes = [t['volume'] for t in current_bar_ticks if 'volume' in t]
+                        if tf_name not in self.stock_data[ticker]:
+                            self.stock_data[ticker][tf_name] = pd.DataFrame(columns=[
+                                'datetime', 'open', 'high', 'low', 'close', 'volume'
+                            ])
 
-                            if not prices:
-                                continue
+                        # Check if we already have a bar for this timeframe and datetime
+                        df = self.stock_data[ticker][tf_name]
+                        existing_bar = df[df['datetime'] == bar['datetime']]
 
-                            bar = {
-                                'datetime': bar_start - timedelta(minutes=minutes),
-                                'open': prices[0],
-                                'high': max(prices),
-                                'low': min(prices),
-                                'close': prices[-1],
-                                'volume': sum(volumes)
-                            }
+                        if not existing_bar.empty:
+                            # Update existing bar
+                            idx = existing_bar.index[0]
+                            df.at[idx, 'high'] = max(df.at[idx, 'high'], bar['high'])
+                            df.at[idx, 'low'] = min(df.at[idx, 'low'], bar['low'])
+                            df.at[idx, 'close'] = bar['close']
+                            df.at[idx, 'volume'] += bar['volume']
+                        else:
+                            # Add new bar
+                            new_row = pd.DataFrame([bar])
+                            self.stock_data[ticker][tf_name] = pd.concat([df, new_row], ignore_index=True)
 
-                            # Update our data structures
-                            if ticker not in self.stock_data:
-                                self.stock_data[ticker] = {}
-
-                            if tf_name not in self.stock_data[ticker]:
-                                self.stock_data[ticker][tf_name] = pd.DataFrame(columns=[
-                                    'datetime', 'open', 'high', 'low', 'close', 'volume'
-                                ])
-
-                            # Check if we already have a bar for this timeframe and datetime
-                            df = self.stock_data[ticker][tf_name]
-                            existing_bar = df[df['datetime'] == bar['datetime']]
-
-                            if not existing_bar.empty:
-                                # Update existing bar
-                                idx = existing_bar.index[0]
-                                df.at[idx, 'high'] = max(df.at[idx, 'high'], bar['high'])
-                                df.at[idx, 'low'] = min(df.at[idx, 'low'], bar['low'])
-                                df.at[idx, 'close'] = bar['close']
-                                df.at[idx, 'volume'] += bar['volume']
-                            else:
-                                # Add new bar
-                                new_row = pd.DataFrame([bar])
-                                self.stock_data[ticker][tf_name] = pd.concat([df, new_row], ignore_index=True)
-
-                            # Sort and limit size
-                            self.stock_data[ticker][tf_name] = self.stock_data[ticker][tf_name].sort_values('datetime')
-                            if len(self.stock_data[ticker][tf_name]) > 10000:
-                                self.stock_data[ticker][tf_name] = self.stock_data[ticker][tf_name].tail(10000)
+                        # Sort and limit size
+                        self.stock_data[ticker][tf_name] = self.stock_data[ticker][tf_name].sort_values('datetime')
+                        if len(self.stock_data[ticker][tf_name]) > 10000:
+                            self.stock_data[ticker][tf_name] = self.stock_data[ticker][tf_name].tail(10000)
 
             except Exception as e:
                 logger.error(f"Error in real-time bar aggregation: {e}")
