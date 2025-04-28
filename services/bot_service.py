@@ -319,14 +319,15 @@ class TelegramBot:
         for timeframe, price_info in ticker_data.items():
             display_name = timeframe_names.get(timeframe, timeframe)
             message += f"{self.escape_markdown(display_name)}:\n"
-            message += f"  Price: ${self.escape_markdown(f'{price_info['price']:.2f}')}\n"
-            message += f"  Open: {self.escape_markdown(f'{price_info['open']:,}')}\n"
-            message += f"  High: {self.escape_markdown(f'{price_info['high']:,}')}\n"
-            message += f"  Low: {self.escape_markdown(f'{price_info['low']:,}')}\n"
-            message += f"  Volume: {self.escape_markdown(f'{price_info['volume']:,}')}\n"
-            message += f"  Time: {self.escape_markdown(price_info['datetime'].strftime('%Y-%m-%d %H:%M'))}\n\n"
-
-        # Get technical indicators for each timeframe
+            # Fixed lines with nested dictionary access in f-strings
+            message += f"  Price: ${self.escape_markdown(f'{price_info.get(\"price\", 0):.2f}')}\n"
+            message += f"  Open: {self.escape_markdown(f'{price_info.get(\"open\", 0):,}')}\n"
+            message += f"  High: {self.escape_markdown(f'{price_info.get(\"high\", 0):,}')}\n"
+            message += f"  Low: {self.escape_markdown(f'{price_info.get(\"low\", 0):,}')}\n"
+            message += f"  Volume: {self.escape_markdown(f'{price_info.get(\"volume\", 0):,}')}\n"
+            message += f"  Time: {self.escape_markdown(price_info.get(\"datetime\").strftime('%Y-%m-%d %H:%M'))}\n\n"
+    
+            # Get technical indicators for each timeframe
         try:
             summary = self.stock_collector.get_summary(ticker)
             if 'timeframes' in summary:
