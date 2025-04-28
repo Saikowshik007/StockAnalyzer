@@ -19,14 +19,7 @@ class TelegramBot:
         self.stock_collector = stock_collector
         self.application = None
         self.pattern_recognizer = TalibPatternRecognition()
-
-        # Initialize sentiment tracker
-        try:
-            from services.sentiment_tracker import SentimentTracker
-            self.sentiment_tracker = None
-            logger.info("Sentiment tracker initialized")
-        except ImportError:
-            logger.warning("SentimentTracker module not available")
+        self.sentiment_tracker=None
 
         # Timeframe configurations
         self.timeframe_weights = {
@@ -280,7 +273,6 @@ class TelegramBot:
             return
 
         ticker = context.args[0].upper()
-        self.db_manager.add_to_watchlist(ticker)
         self.stock_collector.add_stock(ticker)
 
         await update.message.reply_text(f"✅ Added {ticker} to watchlist")
@@ -415,7 +407,7 @@ class TelegramBot:
             if data.empty or timeframe == 'very_short_term':
                 continue
 
-            patterns = self.pattern_recognizer.detect_patterns(data,lookback_periods=5)
+            patterns = self.pattern_recognizer.detect_patterns(data,lookback_periods=10)
 
             if patterns:
                 current_price = data['close'].iloc[-1]

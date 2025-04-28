@@ -3,22 +3,18 @@ import logging
 import pandas as pd
 import threading
 import talib
-import websocket
-import json
 import time
 from datetime import datetime, timedelta
-import requests
 import pytz
 from queue import Queue
 import asyncio
+import yfinance as yf  # Use yfinance library instead of custom API
 
 logger = logging.getLogger(__name__)
 pd.set_option('future.no_silent_downcasting', True)
 
 class YahooMultiStockCollector:
     def __init__(self, db_manager=None):
-        self.base_url = "https://query1.finance.yahoo.com"
-        self.ws_url = "wss://streamer.finance.yahoo.com"  # Yahoo Finance WebSocket URL
         self.watchlist = set()
         self.watchlist.add("SPY")
         self.db_manager = db_manager
@@ -34,18 +30,8 @@ class YahooMultiStockCollector:
         # Track connection status
         self.connected = False
 
-        # Rate limiting tracking
-        self.request_count = 0
-        self.request_reset_time = datetime.now() + timedelta(minutes=1)
-        self.max_requests_per_minute = 5  # Conservative default
-
-        # Websocket connection
-        self.ws = None
-        self.ws_connected = False
+        # Message queue for processing
         self.message_queue = Queue()
-        self.ws_thread = None
-        self.socket_id = None  # Yahoo specific socket ID
-        self.crumb = None  # Yahoo crumb for authentication
 
         # Default time intervals for multi-timeframe analysis
         self.timeframes = {
@@ -69,15 +55,15 @@ class YahooMultiStockCollector:
             '1mo': 43200  # Approximate
         }
 
-        # Base timeframe for data collection (collect once and derive others)
-        self.base_timeframe = '1m'
+        # Changed base timeframe from 1m to 5m to avoid API limits
+        self.base_timeframe = '5m'
 
         # Load existing watchlist from DB if available
         if self.db_manager:
             self._load_watchlist_from_db()
 
-        # Start processing thread
-        self.processing_thread = threading.Thread(target=self._process_messages)
+        # Start processing thread for any background tasks
+        self.processing_thread = threading.Thread(target=self._process_tasks)
         self.processing_thread.daemon = True
         self.processing_thread.start()
 
@@ -85,6 +71,10 @@ class YahooMultiStockCollector:
         self.cache_thread = threading.Thread(target=self._manage_cache)
         self.cache_thread.daemon = True
         self.cache_thread.start()
+
+        # Initial data load for watchlist
+        for ticker in self.watchlist:
+            self._initialize_ticker_data(ticker)
 
     def _load_watchlist_from_db(self):
         """Load watchlist from database."""
@@ -94,168 +84,24 @@ class YahooMultiStockCollector:
                 self.watchlist = set(db_watchlist)
                 logger.info(f"Loaded watchlist from database: {list(self.watchlist)}")
 
-    def _get_yahoo_crumb(self):
-        """Get Yahoo Finance crumb for authentication."""
-        try:
-            session = requests.Session()
-            response = session.get("https://finance.yahoo.com")
-
-            if response.status_code == 200:
-                # Extract crumb from the response - this is simplified
-                # In reality, you might need to parse the HTML to extract the crumb
-                # or use a specific endpoint to get it
-                text = response.text
-                start_index = text.find('"crumb":"') + 9
-                if start_index > 9:  # Found
-                    end_index = text.find('"', start_index)
-                    self.crumb = text[start_index:end_index]
-                    logger.info(f"Got Yahoo crumb: {self.crumb}")
-                    return self.crumb
-
-            logger.error(f"Failed to get Yahoo crumb, status code: {response.status_code}")
-            return None
-
-        except Exception as e:
-            logger.error(f"Error getting Yahoo crumb: {e}")
-            return None
-
-    def connect_websocket(self):
-        """Connect to Yahoo Finance websocket with proper authentication."""
-        # Make sure we have authentication
-        if not hasattr(self, 'cookie') or not self.crumb:
-            if not self._get_yahoo_auth():
-                logger.error("Failed to authenticate with Yahoo Finance")
-                return
-
-        def on_open(ws):
-            logger.info("WebSocket connection opened")
-            self.ws_connected = True
-            self.connected = True
-
-            # Generate a unique socket ID
-            self.socket_id = f"websocket_{int(time.time() * 1000)}"
-
-            # Subscribe to watchlist tickers
-            self._subscribe_watchlist()
-
-        def on_message(ws, message):
-            # Add message to queue for processing
-            self.message_queue.put(message)
-
-        def on_error(ws, error):
-            logger.error(f"WebSocket error: {error}")
-            self.ws_connected = False
-            self.connected = False
-
-        def on_close(ws, close_status_code, close_msg):
-            logger.info(f"WebSocket connection closed: {close_status_code} - {close_msg}")
-            self.ws_connected = False
-            self.connected = False
-
-        # Create websocket connection to Yahoo Finance
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36",
-            "Cookie": f"{self.cookie.name}={self.cookie.value}"
-        }
-
-        # Add crumb to URL if available
-        ws_url = f"{self.ws_url}"
-        if self.crumb:
-            ws_url += f"?crumb={self.crumb}"
-
-        self.ws = websocket.WebSocketApp(
-            ws_url,
-            header=headers,
-            on_open=on_open,
-            on_message=on_message,
-            on_error=on_error,
-            on_close=on_close
-        )
-
-        # Start websocket in a separate thread
-        self.ws_thread = threading.Thread(target=lambda: self.ws.run_forever(
-            ping_interval=30,  # Send a ping every 30 seconds
-            ping_timeout=10    # Wait 10 seconds for pong before considering connection dead
-        ))
-        self.ws_thread.daemon = True
-        self.ws_thread.start()
-
-    def _check_subscriptions(self):
-        """Check if we have active subscriptions."""
-        # Simplified check - in a real system you might want to track subscription status
-        return len(self.watchlist) > 0 and self.ws_connected
-
-    def _process_messages(self):
-        """Process messages from the websocket queue."""
+    def _process_tasks(self):
+        """Process background tasks."""
         while True:
             try:
+                # Process any tasks in the queue if needed
                 if not self.message_queue.empty():
-                    message = self.message_queue.get()
+                    task = self.message_queue.get()
                     try:
-                        # Yahoo sends data in different format than Polygon
-                        # Parse and process accordingly
-                        if message == 'ping':
-                            # Respond to ping with pong
-                            if self.ws_connected:
-                                self.ws.send('pong')
-                            continue
-
-                        data = json.loads(message)
-                        self._process_yahoo_message(data)
-
-                    except json.JSONDecodeError:
-                        logger.error(f"Invalid JSON in message: {message}")
+                        if task.get('type') == 'refresh_data':
+                            ticker = task.get('ticker')
+                            self._initialize_ticker_data(ticker)
                     except Exception as e:
-                        logger.error(f"Error processing message: {e}")
+                        logger.error(f"Error processing task: {e}")
             except Exception as e:
-                logger.error(f"Error in message processing: {e}")
+                logger.error(f"Error in task processing: {e}")
 
             # Small sleep to prevent CPU hogging
-            time.sleep(0.01)
-
-    def _process_yahoo_message(self, data):
-        """Process Yahoo Finance WebSocket message."""
-        try:
-            # Yahoo messages have different structure than Polygon
-            # Example format (simplified):
-            # {'data': [{'id': 'AAPL', 'price': 200.50, 'time': timestamp, 'volume': 1000}]}
-
-            if 'data' in data:
-                for item in data['data']:
-                    ticker = item.get('id')
-                    if not ticker:
-                        continue
-
-                    timestamp_ms = item.get('time')
-                    if not timestamp_ms:
-                        continue
-
-                    timestamp = datetime.fromtimestamp(timestamp_ms / 1000.0, tz=pytz.UTC)
-
-                    # Yahoo might send price updates that don't contain OHLC
-                    # For real-time ticks, you might need to convert to OHLC yourself
-                    # This is a simplified approach
-                    price = item.get('price')
-                    volume = item.get('dayVolume', 0)
-
-                    if price is None:
-                        continue
-
-                    # Create a simplified bar data point
-                    bar_data = {
-                        'datetime': timestamp,
-                        'open': price,
-                        'high': price,
-                        'low': price,
-                        'close': price,
-                        'volume': volume
-                    }
-
-                    # Update our internal data structure
-                    self._update_ticker_data(ticker, bar_data)
-
-        except Exception as e:
-            logger.error(f"Error processing Yahoo message: {e}, data: {data}")
+            time.sleep(0.1)
 
     def _manage_cache(self):
         """Background thread to manage cache expiry."""
@@ -277,11 +123,6 @@ class YahooMultiStockCollector:
                         if key in self.cache_expiry:
                             del self.cache_expiry[key]
 
-                # Reset rate limit counter if needed
-                if current_time > self.request_reset_time:
-                    self.request_count = 0
-                    self.request_reset_time = current_time + timedelta(minutes=1)
-
             except Exception as e:
                 logger.error(f"Error in cache management: {e}")
 
@@ -294,7 +135,7 @@ class YahooMultiStockCollector:
             if ticker not in self.stock_data:
                 self.stock_data[ticker] = {}
 
-            # For 1-minute data (base timeframe), just append
+            # For base timeframe data, just append
             if self.base_timeframe not in self.stock_data[ticker]:
                 self.stock_data[ticker][self.base_timeframe] = pd.DataFrame(columns=[
                     'datetime', 'open', 'high', 'low', 'close', 'volume'
@@ -347,6 +188,11 @@ class YahooMultiStockCollector:
             if interval == self.base_timeframe:
                 continue
 
+            # For lower timeframes than base, fetch directly instead of deriving
+            if self.interval_to_minutes.get(interval, 0) < self.interval_to_minutes.get(self.base_timeframe, 0):
+                # Only fetch if we need this timeframe
+                continue
+
             # Derive higher timeframe data
             derived_data = self._aggregate_timeframe(base_data, interval)
 
@@ -390,88 +236,68 @@ class YahooMultiStockCollector:
 
         return aggregated
 
-    def _check_rate_limit(self):
-        """Check if we're approaching rate limit and back off if needed."""
-        with self.lock:
-            current_time = datetime.now()
-
-            # Reset counter if needed
-            if current_time > self.request_reset_time:
-                self.request_count = 0
-                self.request_reset_time = current_time + timedelta(minutes=1)
-
-            # Check if we're at rate limit
-            if self.request_count >= self.max_requests_per_minute:
-                # Calculate sleep time until reset
-                sleep_time = (self.request_reset_time - current_time).total_seconds()
-                logger.warning(f"Rate limit approaching. Sleeping for {sleep_time} seconds")
-                return sleep_time
-
-            # Increment counter
-            self.request_count += 1
-            return 0
-
-    def _subscribe_watchlist(self):
-        """Subscribe to all tickers in watchlist."""
-        if not self.ws_connected or not self.watchlist:
-            logger.warning("Cannot subscribe: not connected or empty watchlist")
-            return
-
-        try:
-            # Get list of tickers to subscribe to
-            tickers = list(self.watchlist)
-
-            # Create simple subscription message - no need for "ticker/" prefix
-            subscribe_msg = {
-                "subscribe": tickers
-            }
-
-            logger.info(f"Subscribing to {len(tickers)} ticker channels")
-            self.ws.send(json.dumps(subscribe_msg))
-
-        except Exception as e:
-            logger.error(f"Error subscribing to watchlist: {e}")
-
     def add_stock(self, ticker_symbol):
         """Add a stock to the watchlist and persist to database."""
-        with self.lock:
-            if ticker_symbol not in self.watchlist:
-                self.watchlist.add(ticker_symbol)
-                # Also add to database if db_manager is available
-                if self.db_manager:
-                    self.db_manager.add_to_watchlist(ticker_symbol)
-                # Subscribe to the new ticker if websocket is connected
-                if self.ws_connected:
-                    subscribe_msg = {
-                        "subscribe": [ticker_symbol]
-                    }
+        # Validate ticker symbol before adding
+        if not self._validate_ticker(ticker_symbol):
+            logger.warning(f"Invalid ticker symbol: {ticker_symbol}")
+            return False
 
-                    self.ws.send(json.dumps(subscribe_msg))
-                # Initialize historical data for this ticker
-                self._initialize_ticker_data(ticker_symbol)
-                logger.info(f"Added {ticker_symbol} to watchlist")
-                return True
-            else:
-                logger.info(f"{ticker_symbol} already in watchlist")
+        if ticker_symbol not in self.watchlist:
+            self.watchlist.add(ticker_symbol)
+            # Also add to database if db_manager is available
+            if self.db_manager:
+                self.db_manager.add_to_watchlist(ticker_symbol)
+            # Initialize historical data for this ticker
+            self._initialize_ticker_data(ticker_symbol)
+            logger.info(f"Added {ticker_symbol} to watchlist")
+            return True
+        else:
+            logger.info(f"{ticker_symbol} already in watchlist")
+            return False
+
+    def _validate_ticker(self, ticker_symbol):
+        """Validate if ticker symbol exists in Yahoo Finance."""
+        try:
+            ticker_obj = yf.Ticker(ticker_symbol)
+            # Try to get just a single data point
+            data = ticker_obj.history(period="1d")
+            if data.empty:
                 return False
+            return True
+        except Exception as e:
+            logger.error(f"Error validating ticker {ticker_symbol}: {e}")
+            return False
 
     def _initialize_ticker_data(self, ticker_symbol):
-        """Initialize historical data for a ticker symbol using Yahoo Finance API."""
+        """Initialize historical data for a ticker symbol using yfinance."""
         # Determine how much data we need based on the longest timeframe
         max_minutes = max(self.interval_to_minutes.get(tf_config['interval'], 1)
                           for tf_config in self.timeframes.values())
 
-        # Calculate how many days of 1-minute data we need
+        # Calculate how many days of data we need
         bars_needed = max_minutes * 100  # Get enough bars for indicators
         days_back = max(1, int(bars_needed / (6.5 * 60)))  # Trading hours per day
 
+        # Limit days_back to 7 days to avoid API limits
+        days_back = min(7, days_back)
+
         try:
-            # Fetch 1-minute data (our base timeframe) once
-            data = self._fetch_yahoo_historical_data(
-                ticker_symbol,
-                self.base_timeframe,
-                days_back
-            )
+            # Use yfinance to get historical data with chunking for 1m data
+            if self.base_timeframe == '1m':
+                # For 1m data, we need to chunk the requests to avoid API limits
+                data = self._fetch_chunked_historical_data(
+                    ticker_symbol,
+                    days_back=days_back,
+                    interval=self.base_timeframe
+                )
+            else:
+                # For other timeframes, we can use a single request
+                data = self._fetch_yfinance_historical_data(
+                    ticker_symbol,
+                    period=f"{days_back+1}d",  # Add extra day for safety
+                    interval=self.base_timeframe
+                )
 
             if data is not None and not data.empty:
                 # Store in our data structure
@@ -484,17 +310,79 @@ class YahooMultiStockCollector:
 
                     # Derive all other timeframes
                     self._update_derived_timeframes(ticker_symbol)
+            else:
+                logger.warning(f"No data available for {ticker_symbol}")
 
         except Exception as e:
             logger.error(f"Error initializing data for {ticker_symbol}: {e}")
 
-    def _fetch_yahoo_historical_data(self, ticker, interval, days_back):
-        """Fetch historical data from Yahoo Finance API using proper authentication."""
-        # Convert interval to Yahoo format if needed
-        yahoo_interval = self._convert_to_yahoo_interval(interval)
+    def _fetch_chunked_historical_data(self, ticker, days_back=7, interval="1m"):
+        """Fetch historical data in chunks to avoid API limits."""
+        all_data = []
 
+        # For 1m data, Yahoo only allows 7 days at a time
+        # We'll fetch in chunks of 1 day
+        end_date = datetime.now()
+
+        for i in range(min(7, days_back)):
+            start_date = end_date - timedelta(days=1)
+
+            try:
+                # Format dates for yfinance
+                start_str = start_date.strftime('%Y-%m-%d')
+                end_str = end_date.strftime('%Y-%m-%d')
+
+                # Get data for this chunk
+                ticker_obj = yf.Ticker(ticker)
+                chunk_data = ticker_obj.history(
+                    start=start_str,
+                    end=end_str,
+                    interval=interval
+                )
+
+                if not chunk_data.empty:
+                    # Reset index to get Date as a column
+                    chunk_data = chunk_data.reset_index()
+                    all_data.append(chunk_data)
+
+            except Exception as e:
+                logger.error(f"Error fetching chunk for {ticker} ({start_str} to {end_str}): {e}")
+
+            # Move to previous day
+            end_date = start_date
+
+        # Combine all chunks
+        if all_data:
+            combined_df = pd.concat(all_data, ignore_index=True)
+
+            # Format dataframe to match our expected format
+            combined_df = combined_df.rename(columns={
+                'Datetime': 'datetime',
+                'Date': 'datetime',  # Handle both column names
+                'Open': 'open',
+                'High': 'high',
+                'Low': 'low',
+                'Close': 'close',
+                'Volume': 'volume'
+            })
+
+            # Convert datetime to UTC for consistency
+            combined_df['datetime'] = pd.to_datetime(combined_df['datetime']).dt.tz_convert('UTC')
+
+            # Select only the columns we need
+            combined_df = combined_df[['datetime', 'open', 'high', 'low', 'close', 'volume']]
+
+            # Remove duplicates and sort
+            combined_df = combined_df.drop_duplicates(subset=['datetime']).sort_values('datetime')
+
+            return combined_df
+        else:
+            return pd.DataFrame(columns=['datetime', 'open', 'high', 'low', 'close', 'volume'])
+
+    def _fetch_yfinance_historical_data(self, ticker, period="5d", interval="5m"):
+        """Fetch historical data using yfinance library."""
         # Create cache key
-        cache_key = f"{ticker}_{yahoo_interval}_{days_back}"
+        cache_key = f"{ticker}_{interval}_{period}"
 
         # Return cached response if available
         with self.lock:
@@ -502,129 +390,74 @@ class YahooMultiStockCollector:
                 logger.info(f"Using cached data for {cache_key}")
                 return self.api_cache[cache_key].copy()
 
-        # Check rate limit before proceeding
-        sleep_time = self._check_rate_limit()
-        if sleep_time > 0:
-            time.sleep(sleep_time)
-
-        # Make sure we have authentication
-        if not hasattr(self, 'cookie') or not self.crumb:
-            if not self._get_yahoo_auth():
-                logger.error("Failed to authenticate with Yahoo Finance")
-                return None
-
-        # Set date range
-        end_ts = int(time.time())
-        start_ts = end_ts - (days_back * 24 * 60 * 60)
-
-        # Yahoo Finance API endpoint
-        url = f"{self.base_url}/v7/finance/download/{ticker}"
-
-        params = {
-            "period1": start_ts,
-            "period2": end_ts,
-            "interval": yahoo_interval,
-            "events": "history",
-            "crumb": self.crumb
-        }
-
         try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36"
-            }
+            # Convert interval for yfinance if needed
+            yf_interval = interval
+            if interval == '60m':
+                yf_interval = '1h'
 
-            response = requests.get(
-                url,
-                params=params,
-                headers=headers,
-                cookies={self.cookie.name: self.cookie.value}
-            )
+            # Get historical data using yfinance
+            ticker_obj = yf.Ticker(ticker)
 
-            if response.status_code != 200:
-                logger.error(f"Error fetching Yahoo data: {response.status_code} - {response.text}")
+            # For shorter timeframes, use a shorter period to avoid limits
+            adjusted_period = period
+            if interval in ['1m', '2m']:
+                # For 1m and 2m data, use max 7d as per Yahoo limits
+                adjusted_period = "7d"
 
-                # If authentication failed, try to refresh auth
-                if response.status_code in [401, 403, 429]:
-                    logger.info("Attempting to refresh authentication...")
-                    if self._get_yahoo_auth():
-                        # Retry with new auth data
-                        return self._fetch_yahoo_historical_data(ticker, interval, days_back)
+            df = ticker_obj.history(period=adjusted_period, interval=yf_interval)
 
-                return None
+            # Format dataframe to match our expected format
+            if not df.empty:
+                # Reset index to get Date as a column
+                df = df.reset_index()
 
-            # Process CSV response
-            content = response.text
-            if ',' in content and 'Date' in content:
-                # Parse CSV data
-                lines = content.strip().split('\n')
-                headers = lines[0].split(',')
+                # Rename columns to match our format
+                df = df.rename(columns={
+                    'Datetime': 'datetime',
+                    'Date': 'datetime',  # Handle both column names
+                    'Open': 'open',
+                    'High': 'high',
+                    'Low': 'low',
+                    'Close': 'close',
+                    'Volume': 'volume'
+                })
 
-                data_dict = {
-                    "datetime": [],
-                    "open": [],
-                    "high": [],
-                    "low": [],
-                    "close": [],
-                    "volume": []
-                }
+                # Convert datetime to UTC for consistency
+                df['datetime'] = pd.to_datetime(df['datetime']).dt.tz_convert('UTC')
 
-                for line in lines[1:]:
-                    values = line.split(',')
-                    if len(values) >= 6:
-                        date_str = values[0]
-                        try:
-                            # Parse date
-                            date = datetime.strptime(date_str, '%Y-%m-%d')
-                            # Add data to dict
-                            data_dict["datetime"].append(date)
-                            data_dict["open"].append(float(values[1]) if values[1] != 'null' else None)
-                            data_dict["high"].append(float(values[2]) if values[2] != 'null' else None)
-                            data_dict["low"].append(float(values[3]) if values[3] != 'null' else None)
-                            data_dict["close"].append(float(values[4]) if values[4] != 'null' else None)
-                            data_dict["volume"].append(int(values[6]) if values[6] != 'null' and len(values) > 6 else 0)
-                        except (ValueError, IndexError) as e:
-                            logger.warning(f"Error parsing line: {line}, error: {e}")
+                # Select only the columns we need
+                columns_to_select = ['datetime', 'open', 'high', 'low', 'close', 'volume']
+                df = df[[col for col in columns_to_select if col in df.columns]]
 
-                df = pd.DataFrame(data_dict)
-                df = df.dropna()
+                # Add any missing columns with default values
+                for col in columns_to_select:
+                    if col not in df.columns:
+                        if col == 'datetime':
+                            df[col] = pd.to_datetime('now', utc=True)
+                        elif col == 'volume':
+                            df[col] = 0
+                        else:
+                            df[col] = 0.0
 
                 # Cache the result
-                if not df.empty:
-                    with self.lock:
-                        self.api_cache[cache_key] = df.copy()
-                        # Set expiry time (30 minutes)
-                        self.cache_expiry[cache_key] = datetime.now() + timedelta(minutes=30)
+                with self.lock:
+                    self.api_cache[cache_key] = df.copy()
+                    # Set expiry time (30 minutes)
+                    self.cache_expiry[cache_key] = datetime.now() + timedelta(minutes=30)
 
                 return df
-
-            logger.error("Unexpected response format from Yahoo Finance")
-            return None
+            else:
+                logger.warning(f"Empty dataframe returned for {ticker}")
+                return pd.DataFrame(columns=['datetime', 'open', 'high', 'low', 'close', 'volume'])
 
         except Exception as e:
-            logger.error(f"Error fetching Yahoo data for {ticker}: {e}")
-            return None
+            logger.error(f"Error fetching yfinance data for {ticker}: {e}")
+            # Check if it's a delisted error
+            if "possibly delisted" in str(e):
+                logger.warning(f"Stock {ticker} appears to be delisted or invalid")
 
-    def _convert_to_yahoo_interval(self, interval):
-        """Convert our interval format to Yahoo Finance format."""
-        # Our format: 1m, 2m, 5m, 15m, 30m, 60m, 1h, 1d, 5d, 1wk, 1mo
-        # Yahoo format: 1m, 2m, 5m, 15m, 30m, 60m, 1h, 1d, 5d, 1wk, 1mo
-
-        # Map common intervals
-        mapping = {
-            '1m': '1m',
-            '2m': '2m',
-            '5m': '5m',
-            '15m': '15m',
-            '30m': '30m',
-            '60m': '60m',
-            '1h': '1h',
-            '1d': '1d',
-            '5d': '5d',
-            '1wk': '1wk',
-            '1mo': '1mo'
-        }
-
-        return mapping.get(interval, '1m')  # Default to 1m if not found
+            return pd.DataFrame(columns=['datetime', 'open', 'high', 'low', 'close', 'volume'])
 
     def remove_stock(self, ticker_symbol):
         """Remove a stock from the watchlist and update database."""
@@ -635,20 +468,6 @@ class YahooMultiStockCollector:
                 # Also remove from database if db_manager is available
                 if self.db_manager:
                     self.db_manager.remove_from_watchlist(ticker_symbol)
-
-                # Unsubscribe from the ticker if websocket is connected
-                if self.ws_connected:
-                    unsubscribe_msg = {
-                        "unsubscribe": [{
-                            "subscribe": f"ticker/{ticker_symbol}"
-                        }],
-                        "socket_id": self.socket_id
-                    }
-
-                    if self.crumb:
-                        unsubscribe_msg["crumb"] = self.crumb
-
-                    self.ws.send(json.dumps(unsubscribe_msg))
 
                 # Remove from our data storage
                 if ticker_symbol in self.stock_data:
@@ -670,6 +489,11 @@ class YahooMultiStockCollector:
         Retrieves from cache/memory first, then derives from base data if possible,
         finally falls back to API only when necessary.
         """
+        # Validate interval
+        if interval not in self.interval_to_minutes:
+            logger.warning(f"Invalid interval: {interval}. Using {self.base_timeframe} instead.")
+            interval = self.base_timeframe
+
         with self.lock:
             # Find the timeframe that matches this interval
             matching_tf = None
@@ -682,24 +506,44 @@ class YahooMultiStockCollector:
             if matching_tf and ticker_symbol in self.stock_data and matching_tf in self.stock_data[ticker_symbol]:
                 return self.stock_data[ticker_symbol][matching_tf].copy()
 
-            # If we have base timeframe data, derive the requested interval
-            if ticker_symbol in self.stock_data and self.base_timeframe in self.stock_data[ticker_symbol]:
-                base_data = self.stock_data[ticker_symbol][self.base_timeframe]
-                if not base_data.empty:
-                    derived_data = self._aggregate_timeframe(base_data, interval)
+            # If requesting base timeframe data directly
+            if interval == self.base_timeframe and ticker_symbol in self.stock_data and interval in self.stock_data[ticker_symbol]:
+                return self.stock_data[ticker_symbol][interval].copy()
 
-                    # Cache this derived data for future use
-                    if matching_tf:
-                        self.stock_data[ticker_symbol][matching_tf] = derived_data
+            # For a timeframe that's higher than our base, derive it
+            if self.interval_to_minutes.get(interval, 0) >= self.interval_to_minutes.get(self.base_timeframe, 0):
+                if ticker_symbol in self.stock_data and self.base_timeframe in self.stock_data[ticker_symbol]:
+                    base_data = self.stock_data[ticker_symbol][self.base_timeframe]
+                    if not base_data.empty:
+                        derived_data = self._aggregate_timeframe(base_data, interval)
 
-                    return derived_data
+                        # Cache this derived data for future use
+                        if matching_tf:
+                            self.stock_data[ticker_symbol][matching_tf] = derived_data
 
-        # If we don't have the data locally, fetch it from the API as a last resort
-        return self._fetch_yahoo_historical_data(
-            ticker_symbol,
-            interval,
-            5  # Default to 5 days for ad-hoc requests
-        )
+                        return derived_data
+
+        # If we need to fetch the data directly (either lower timeframe or missing data)
+        # Determine appropriate period based on interval
+        period = "5d"  # Default period
+        if interval in ['1d', '5d', '1wk', '1mo']:
+            period = "60d"  # Get more history for longer intervals
+        elif interval in ['1m', '2m']:
+            period = "7d"  # Respect Yahoo's limit for 1m data
+
+        # For 1m data, use chunked approach to avoid limits
+        if interval == '1m':
+            return self._fetch_chunked_historical_data(
+                ticker_symbol,
+                days_back=7,  # Yahoo's limit
+                interval=interval
+            )
+        else:
+            return self._fetch_yfinance_historical_data(
+                ticker_symbol,
+                period=period,
+                interval=interval
+            )
 
     def get_multi_timeframe_data(self, ticker_symbol):
         """Get data for all timeframes."""
@@ -827,22 +671,57 @@ class YahooMultiStockCollector:
         """Get the latest price for each stock in watchlist across all timeframes."""
         latest_prices = {}
         for ticker in self.watchlist:
-            all_data = self.get_multi_timeframe_data(ticker)
-            ticker_prices = {}
-            for timeframe, data in all_data.items():
-                if not data.empty:
-                    latest_row = data.iloc[-1]
-                    ticker_prices[timeframe] = {
-                        'datetime': latest_row['datetime'],
-                        'open': latest_row['open'],
-                        'high': latest_row['high'],
-                        'low': latest_row['low'],
-                        'price': latest_row['close'],
-                        'volume': latest_row['volume']
+            # Get live price using yfinance directly
+            try:
+                ticker_obj = yf.Ticker(ticker)
+                live_data = ticker_obj.history(period="1d", interval="1m").tail(1)
+
+                if not live_data.empty:
+                    # Format the live data
+                    latest_row = live_data.iloc[0]
+                    live_price = {
+                        'datetime': live_data.index[0],
+                        'open': latest_row['Open'],
+                        'high': latest_row['High'],
+                        'low': latest_row['Low'],
+                        'price': latest_row['Close'],
+                        'volume': latest_row['Volume']
                     }
 
-            if ticker_prices:
-                latest_prices[ticker] = ticker_prices
+                    latest_prices[ticker] = {'live': live_price}
+
+                    # Also get data for all timeframes
+                    all_data = self.get_multi_timeframe_data(ticker)
+                    for timeframe, data in all_data.items():
+                        if not data.empty:
+                            tf_latest_row = data.iloc[-1]
+                            latest_prices[ticker][timeframe] = {
+                                'datetime': tf_latest_row['datetime'],
+                                'open': tf_latest_row['open'],
+                                'high': tf_latest_row['high'],
+                                'low': tf_latest_row['low'],
+                                'price': tf_latest_row['close'],
+                                'volume': tf_latest_row['volume']
+                            }
+            except Exception as e:
+                logger.error(f"Error getting latest price for {ticker}: {e}")
+                # Fallback to our stored data
+                all_data = self.get_multi_timeframe_data(ticker)
+                ticker_prices = {}
+                for timeframe, data in all_data.items():
+                    if not data.empty:
+                        latest_row = data.iloc[-1]
+                        ticker_prices[timeframe] = {
+                            'datetime': latest_row['datetime'],
+                            'open': latest_row['open'],
+                            'high': latest_row['high'],
+                            'low': latest_row['low'],
+                            'price': latest_row['close'],
+                            'volume': latest_row['volume']
+                        }
+
+                if ticker_prices:
+                    latest_prices[ticker] = ticker_prices
 
         return latest_prices
 
@@ -890,8 +769,11 @@ class YahooMultiStockCollector:
                 logger.error(f"Error refreshing data for {ticker}: {e}")
 
     async def refresh_all_data_async(self):
-        """Asynchronously refresh data for all tickers in the watchlist with throttling."""
+        """Asynchronously refresh data for all tickers in the watchlist."""
         tickers = list(self.watchlist)
+
+        # Add delay between ticker refreshes to avoid overwhelming the API
+        delay_seconds = 1
 
         for ticker in tickers:
             try:
@@ -911,27 +793,123 @@ class YahooMultiStockCollector:
 
                 if should_refresh:
                     logger.info(f"Refreshing data for {ticker}")
-                    # Create a task to run the initialization in background
-                    asyncio.create_task(self._initialize_ticker_data_async(ticker))
+                    # Add refresh task to queue
+                    self.message_queue.put({'type': 'refresh_data', 'ticker': ticker})
 
                     # Sleep briefly between refreshes to avoid rate limits
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(delay_seconds)
 
             except Exception as e:
-                logger.error(f"Error refreshing data for {ticker}: {e}")
+                logger.error(f"Error scheduling refresh for {ticker}: {e}")
 
-    async def _initialize_ticker_data_async(self, ticker_symbol):
-        """Async version of _initialize_ticker_data that runs in a thread pool."""
-        loop = asyncio.get_event_loop()
-        # Run the blocking _initialize_ticker_data in a thread pool
-        await loop.run_in_executor(None, self._initialize_ticker_data, ticker_symbol)
+    def get_company_info(self, ticker_symbol):
+        """Get company information using yfinance."""
+        try:
+            ticker_obj = yf.Ticker(ticker_symbol)
+            info = ticker_obj.info
+
+            # Handle case where info may be empty or None
+            if not info:
+                return {"error": "No company information available"}
+
+            # Extract relevant company information
+            company_info = {
+                'name': info.get('shortName', 'N/A'),
+                'sector': info.get('sector', 'N/A'),
+                'industry': info.get('industry', 'N/A'),
+                'market_cap': info.get('marketCap', 'N/A'),
+                'pe_ratio': info.get('trailingPE', 'N/A'),
+                'dividend_yield': info.get('dividendYield', 'N/A'),
+                'beta': info.get('beta', 'N/A'),
+                'fifty_two_week_high': info.get('fiftyTwoWeekHigh', 'N/A'),
+                'fifty_two_week_low': info.get('fiftyTwoWeekLow', 'N/A'),
+                'avg_volume': info.get('averageVolume', 'N/A'),
+                'description': info.get('longBusinessSummary', 'N/A')
+            }
+
+            return company_info
+
+        except Exception as e:
+            logger.error(f"Error getting company info for {ticker_symbol}: {e}")
+            return {"error": f"Unable to retrieve company information: {str(e)}"}
+
+    def get_earnings_dates(self, ticker_symbol):
+        """Get upcoming earnings dates using yfinance."""
+        try:
+            ticker_obj = yf.Ticker(ticker_symbol)
+            earnings_dates = ticker_obj.earnings_dates
+
+            # Handle case where earnings_dates may be None
+            if earnings_dates is None:
+                return []
+
+            if not earnings_dates.empty:
+                # Format the earnings dates
+                earnings_list = []
+                for date, row in earnings_dates.iterrows():
+                    earnings_list.append({
+                        'date': date.strftime('%Y-%m-%d'),
+                        'estimate': row.get('EPS Estimate', 'N/A'),
+                        'actual': row.get('Reported EPS', 'N/A'),
+                        'surprise': row.get('Surprise(%)', 'N/A')
+                    })
+                return earnings_list
+            else:
+                return []
+
+        except Exception as e:
+            logger.error(f"Error getting earnings dates for {ticker_symbol}: {e}")
+            return []
+
+    def check_ticker_validity(self, ticker_symbol):
+        """Check if a ticker symbol is valid and active."""
+        try:
+            ticker_obj = yf.Ticker(ticker_symbol)
+            info = ticker_obj.info
+
+            # Check if we got valid info back
+            if info and 'regularMarketPrice' in info and info['regularMarketPrice'] is not None:
+                return {
+                    'valid': True,
+                    'name': info.get('shortName', ticker_symbol),
+                    'price': info.get('regularMarketPrice', 'N/A')
+                }
+            else:
+                # Try to get just recent history as another validation method
+                history = ticker_obj.history(period="1d")
+                if history.empty:
+                    return {
+                        'valid': False,
+                        'reason': 'No price data available'
+                    }
+                else:
+                    return {
+                        'valid': True,
+                        'name': ticker_symbol,
+                        'price': history['Close'].iloc[-1] if not history.empty else 'N/A'
+                    }
+
+        except Exception as e:
+            logger.error(f"Error checking ticker validity for {ticker_symbol}: {e}")
+            return {
+                'valid': False,
+                'reason': str(e)
+            }
+
+    def get_available_timeframes(self):
+        """Return the available timeframes configuration."""
+        return {name: config['interval'] for name, config in self.timeframes.items()}
+
+    def clear_cache(self):
+        """Clear the API response cache."""
+        with self.lock:
+            self.api_cache.clear()
+            self.cache_expiry.clear()
+        logger.info("API cache cleared")
+        return True
 
     def close(self):
-        """Close the websocket connection and clean up resources."""
-        if self.ws:
-            self.ws.close()
-            logger.info("Websocket connection closed")
-
+        """Clean up resources."""
         # Wait for threads to finish
         if self.cache_thread and self.cache_thread.is_alive():
             self.cache_thread.join(timeout=1)
@@ -939,53 +917,7 @@ class YahooMultiStockCollector:
         if self.processing_thread and self.processing_thread.is_alive():
             self.processing_thread.join(timeout=1)
 
-
         logger.info("YahooMultiStockCollector closed successfully")
 
 
-    def _get_yahoo_auth(self):
-        """Get Yahoo Finance cookie and crumb for authentication using a simpler approach."""
-        try:
-            # Setup headers with user agent
-            user_agent_key = "User-Agent"
-            user_agent_value = "Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36"
-            headers = {user_agent_key: user_agent_value}
 
-            # Step 1: Get the cookie
-            response = requests.get(
-                "https://fc.yahoo.com", headers=headers, allow_redirects=True
-            )
-
-            if not response.cookies:
-                logger.error("Failed to obtain Yahoo auth cookie")
-                return False
-
-            cookie = list(response.cookies)[0]
-
-            # Step 2: Use the cookie to get the crumb
-            crumb_response = requests.get(
-                "https://query1.finance.yahoo.com/v1/test/getcrumb",
-                headers=headers,
-                cookies={cookie.name: cookie.value},
-                allow_redirects=True,
-            )
-
-            if crumb_response.status_code != 200:
-                logger.error(f"Failed to get crumb, status code: {crumb_response.status_code}")
-                return False
-
-            crumb = crumb_response.text
-
-            if not crumb:
-                logger.error("Empty crumb returned from Yahoo")
-                return False
-
-            # Store auth data for later use
-            self.cookie = cookie
-            self.crumb = crumb
-            logger.info(f"Successfully obtained Yahoo auth: cookie={cookie.name}, crumb={crumb}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Error getting Yahoo authentication: {e}")
-            return False

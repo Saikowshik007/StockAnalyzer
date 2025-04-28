@@ -5,7 +5,7 @@ import threading
 import time
 
 from collectors.news_collector import NewsMonitor
-from collectors.stock_collector import YahooMultiStockCollector
+from collectors.stock_collector import YahooMultiStockCollector  # Updated import
 from database.db_manager import DatabaseManager
 from services.bot_service import TelegramBot
 from services.pattern_monitor import TalibPatternMonitor
@@ -38,7 +38,7 @@ class FinancialMonitorApp:
         db_config = self.config.get('database', {})
         self.db_manager = DatabaseManager(db_config)
 
-        # Update stock collector to use Yahoo Finance (no API key needed)
+        # Update stock collector to use Yahoo Finance via yfinance
         self.stock_collector = YahooMultiStockCollector(self.db_manager)
 
         # Set timeframes from config or use defaults
@@ -89,44 +89,8 @@ class FinancialMonitorApp:
             self.db_manager.add_to_watchlist(ticker)
             self.stock_collector.add_stock(ticker)
 
-
-    def run_stock_collector(self):
-        """Run the stock collector."""
-        try:
-            # Run in a completely separate thread with clear isolation
-            collector_thread = threading.Thread(
-                target=self._start_stock_collector_with_new_loop,
-                daemon=True
-            )
-            collector_thread.start()
-
-            # Wait for connection to be established (with timeout)
-            start_time = time.time()
-            while not self.stock_collector.connected and time.time() - start_time < 30:
-                time.sleep(0.1)
-
-            if not self.stock_collector.connected:
-                logger.warning("WebSocket connection not established after timeout. Bot may have issues.")
-            else:
-                logger.info("Stock collector WebSocket connected successfully")
-        except Exception as e:
-            logger.error(f"Error running stock collector: {e}")
-
-    def _start_stock_collector_with_new_loop(self):
-        """Start stock collector with a dedicated event loop in a separate thread."""
-        # Create a new event loop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        try:
-            # Connect to Yahoo WebSocket
-            self.stock_collector.connect_websocket()
-            # Run the loop until interrupted
-            loop.run_forever()
-        except Exception as e:
-            logger.error(f"Error in stock collector thread: {e}")
-        finally:
-            loop.close()
+    # Remove the run_stock_collector and _start_stock_collector_with_new_loop methods
+    # since we no longer need WebSocket connectivity with yfinance
 
     def run_stock_data_saver(self):
         """Periodically save stock data to database for all timeframes."""
@@ -143,7 +107,6 @@ class FinancialMonitorApp:
                             # Save with timeframe information
                             self.db_manager.save_stock_data({
                                 'ticker': ticker,
-                                'timeframe': timeframe,
                                 'timestamp': latest['datetime'],
                                 'open': latest['open'],
                                 'high': latest['high'],
@@ -188,6 +151,28 @@ class FinancialMonitorApp:
                 logger.error(f"Error updating sentiment data: {e}")
                 time.sleep(300)  # Wait 5 minutes and try again
 
+    def run_data_refresher(self):
+        """Periodically refresh stock data for all watchlist items."""
+        while not self.shutdown_event.is_set():
+            try:
+                # Refresh all stock data
+                watchlist = self.db_manager.get_active_watchlist()
+                logger.info(f"Refreshing data for {len(watchlist)} stocks in watchlist")
+
+                for ticker in watchlist:
+                    try:
+                        self.stock_collector.refresh_data(ticker)
+                        # Small delay between refreshes to avoid potential rate limits
+                        time.sleep(0.5)
+                    except Exception as e:
+                        logger.error(f"Error refreshing data for {ticker}: {e}")
+
+                logger.info("Data refresh completed")
+                time.sleep(300)  # Refresh every 5 minutes
+            except Exception as e:
+                logger.error(f"Error in data refresher: {e}")
+                time.sleep(60)  # Wait 1 minute and try again
+
     async def run(self):
         """Main application runner."""
         try:
@@ -199,21 +184,28 @@ class FinancialMonitorApp:
             # Start backup manager
             self.db_manager.backup_database()
 
-            # Connect to Yahoo WebSocket first
-            # self.run_stock_collector()
-            # logger.info("Yahoo Finance WebSocket connection initialized")
-            #
-            # # Start stock data saver in a separate thread
-            # saver_thread = threading.Thread(target=self.run_stock_data_saver, daemon=True)
-            # saver_thread.start()
-            #
-            # # Start pattern monitor in a separate thread
-            # pattern_thread = threading.Thread(target=self.run_pattern_monitor, daemon=True)
-            # pattern_thread.start()
-            #
-            # # Start sentiment tracker in a separate thread
-            # sentiment_thread = threading.Thread(target=self.run_sentiment_tracker, daemon=True)
-            # sentiment_thread.start()
+            # Initially refresh stock data for the watchlist
+            logger.info("Initializing stock data...")
+            watchlist = self.db_manager.get_active_watchlist()
+            for ticker in watchlist:
+                self.stock_collector.refresh_data(ticker)
+            logger.info("Stock data initialized")
+
+            # Start stock data saver in a separate thread
+            saver_thread = threading.Thread(target=self.run_stock_data_saver, daemon=True)
+            saver_thread.start()
+
+            # Start pattern monitor in a separate thread
+            pattern_thread = threading.Thread(target=self.run_pattern_monitor, daemon=True)
+            pattern_thread.start()
+
+            # Start sentiment tracker in a separate thread
+            sentiment_thread = threading.Thread(target=self.run_sentiment_tracker, daemon=True)
+            sentiment_thread.start()
+
+            # Start data refresher in a separate thread
+            refresher_thread = threading.Thread(target=self.run_data_refresher, daemon=True)
+            refresher_thread.start()
 
             # Create tasks for async components
             news_task = asyncio.create_task(self.news_monitor.monitor())
@@ -240,13 +232,13 @@ class FinancialMonitorApp:
         self.shutdown_event.set()
         self.news_monitor.stop()
 
-        # Close Yahoo WebSocket connection first
+        # Close stock collector resources
         if hasattr(self, 'stock_collector'):
-            logger.info("Closing Yahoo Finance WebSocket connection...")
+            logger.info("Closing stock collector...")
             self.stock_collector.close()
-            logger.info("Yahoo Finance WebSocket connection closed")
+            logger.info("Stock collector closed")
 
-        # Give the WebSocket time to fully disconnect before handling tasks
+        # Give a moment for threads to process the shutdown event
         await asyncio.sleep(1)
 
         # Cancel all running tasks
