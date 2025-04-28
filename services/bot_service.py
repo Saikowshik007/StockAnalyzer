@@ -608,12 +608,9 @@ class TelegramBot:
             self.application.add_handler(CommandHandler("pattern", self.check_pattern))
             self.application.add_handler(CommandHandler("latest", self.latest_news))
             self.application.add_handler(CommandHandler("stats", self.stats))
-
-            # Add new sentiment-related commands
             self.application.add_handler(CommandHandler("sentiment", self.sentiment))
             self.application.add_handler(CommandHandler("tickersentiment", self.ticker_sentiment))
             self.application.add_handler(CommandHandler("analyze", self.analyze))
-
             self.application.add_handler(CallbackQueryHandler(self.button_callback))
 
             # Initialize the application
@@ -621,9 +618,9 @@ class TelegramBot:
             await self.application.initialize()
             await self.application.start()
 
-            logger.info("Starting telegram polling with enhanced debugging")
+            logger.info("Starting telegram polling")
 
-            # Enhanced debugging for update processing
+            # Manual polling loop without redundant processing
             update_offset = 0
 
             while True:
@@ -638,34 +635,23 @@ class TelegramBot:
 
                     if updates:
                         for update in updates:
-                            # Detailed logging about the update
-                            if update.message:
+                            # Log update info
+                            if update.message and update.message.text:
                                 logger.info(f"Message update: ID={update.update_id}, text='{update.message.text}'")
-                                if update.message.text.startswith('/'):
-                                    logger.info(f"Command detected: {update.message.text}")
-
-                                    # Try to manually match the command
-                                    command = update.message.text.split()[0].lower()
-                                    if command == '/start' or command == '/help':
-                                        logger.info("Manually processing /start command")
-                                        await self.start(update, None)
-                                    elif command == '/watchlist':
-                                        logger.info("Manually processing /watchlist command")
-                                        await self.watchlist(update, None)
-                                    # Add other commands as needed
-
                             elif update.callback_query:
                                 logger.info(f"Callback query: ID={update.update_id}, data='{update.callback_query.data}'")
 
-                            # Still try the regular processing too
+                            # Process update ONLY ONCE through the application's handlers
                             try:
                                 await self.application.process_update(update)
+                                logger.info(f"Processed update {update.update_id}")
                             except Exception as e:
-                                logger.error(f"Error in application.process_update: {e}", exc_info=True)
+                                logger.error(f"Error processing update {update.update_id}: {e}", exc_info=True)
 
-                            # Update the offset
+                            # Update offset
                             update_offset = update.update_id + 1
 
+                    # Short delay between polling cycles
                     await asyncio.sleep(0.1)
 
                 except asyncio.CancelledError:
@@ -682,8 +668,10 @@ class TelegramBot:
             # Clean shutdown
             try:
                 logger.info("Shutting down Telegram bot")
-                await self.application.stop()
-                await self.application.shutdown()
+                if hasattr(self, 'application'):
+                    await self.application.stop()
+                    await self.application.shutdown()
+                    logger.info("Telegram bot shutdown complete")
             except Exception as e:
                 logger.error(f"Error during bot shutdown: {e}", exc_info=True)
 
