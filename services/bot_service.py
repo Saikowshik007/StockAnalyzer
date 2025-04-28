@@ -23,7 +23,7 @@ class TelegramBot:
         # Initialize sentiment tracker
         try:
             from services.sentiment_tracker import SentimentTracker
-            self.sentiment_tracker = SentimentTracker(self.db_manager)
+            self.sentiment_tracker = None
             logger.info("Sentiment tracker initialized")
         except ImportError:
             logger.warning("SentimentTracker module not available")
