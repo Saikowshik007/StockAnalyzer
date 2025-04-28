@@ -625,22 +625,14 @@ class TelegramBot:
             logger.info("Starting Telegram bot application")
             await self.application.start()
 
-            # Start automatic polling with explicit parameters
-            logger.info("Starting automatic polling")
-            await self.application.updater.start_polling(
-                poll_interval=0.5,      # Check for updates every 0.5 seconds
-                timeout=10,             # Timeout for long polling
-                bootstrap_retries=5,    # Retry bootstrap a few times on failure
-                read_timeout=7,         # Shorter read timeout
-                write_timeout=7,        # Shorter write timeout
-                connect_timeout=7,      # Shorter connect timeout
-                pool_timeout=None       # No pool timeout
-            )
-            logger.info("Automatic polling started successfully")
+            # Start polling with minimal parameters
+            logger.info("Starting polling")
+            await self.application.updater.start_polling()
+            logger.info("Polling started successfully")
 
             # Keep the application running
             while True:
-                await asyncio.sleep(60)  # Check every minute if we're still running
+                await asyncio.sleep(60)  # Log every minute
                 logger.debug("Bot is still running")
 
         except asyncio.CancelledError:
