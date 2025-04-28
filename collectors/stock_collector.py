@@ -4,13 +4,11 @@ import pandas as pd
 import threading
 import talib
 import time
-import json
 from datetime import datetime, timedelta
 import pytz
 from queue import Queue
 import asyncio
-import yfinance as yf  # For historical data
-from yliveticker import YLiveTicker  # For real-time data
+import yfinance as yf  # Use yfinance library instead of custom API
 
 logger = logging.getLogger(__name__)
 pd.set_option('future.no_silent_downcasting', True)
@@ -25,19 +23,12 @@ class YahooMultiStockCollector:
         # Data storage for each ticker and timeframe
         self.stock_data = {}
 
-        # Real-time latest quote storage
-        self.real_time_quotes = {}
-
-        # Tick data storage (for real-time intraday bars)
-        self.tick_data = {}
-
         # Cache for API responses
         self.api_cache = {}
         self.cache_expiry = {}
 
         # Track connection status
         self.connected = False
-        self.live_ticker_running = False
 
         # Message queue for processing
         self.message_queue = Queue()
@@ -80,16 +71,6 @@ class YahooMultiStockCollector:
         self.cache_thread = threading.Thread(target=self._manage_cache)
         self.cache_thread.daemon = True
         self.cache_thread.start()
-
-        # Start live ticker thread
-        self.live_ticker_thread = threading.Thread(target=self._start_live_ticker)
-        self.live_ticker_thread.daemon = True
-        self.live_ticker_thread.start()
-
-        # Start real-time bar aggregation thread
-        self.bar_aggregation_thread = threading.Thread(target=self._aggregate_real_time_bars)
-        self.bar_aggregation_thread.daemon = True
-        self.bar_aggregation_thread.start()
 
         # Initial data load for watchlist
         for ticker in self.watchlist:
@@ -148,212 +129,6 @@ class YahooMultiStockCollector:
             # Check every 10 seconds
             time.sleep(10)
 
-    def _start_live_ticker(self):
-        """Start the YLiveTicker real-time data feed in a dedicated thread."""
-
-        def websocket_thread():
-            """Inner function to run the WebSocket in its own thread."""
-            while self.live_ticker_running:
-                try:
-                    logger.info("Starting YLiveTicker connection...")
-
-                    # Define callback for real-time data
-                    def on_new_msg(ws, data):
-                        try:
-                            # Extract relevant data from the ticker update
-                            ticker_symbol = data.get('id', '').split('.')[0]
-
-                            # Skip if not in our watchlist (check without lock)
-                            if ticker_symbol not in self.watchlist:
-                                return
-
-                            # Extract price data
-                            price_data = data.get('price', {})
-                            if not price_data:
-                                return
-
-                            timestamp = datetime.now(pytz.UTC)
-
-                            # Prepare data objects
-                            quote_data = {
-                                'datetime': timestamp,
-                                'price': price_data.get('regularMarketPrice', None),
-                                'volume': price_data.get('regularMarketVolume', 0),
-                                'high': price_data.get('regularMarketDayHigh', None),
-                                'low': price_data.get('regularMarketDayLow', None),
-                                'open': price_data.get('regularMarketOpen', None),
-                                'timestamp': timestamp
-                            }
-
-                            tick = {
-                                'datetime': timestamp,
-                                'price': price_data.get('regularMarketPrice', None),
-                                'volume': price_data.get('regularMarketVolume', 0) / 100,
-                            }
-
-                            # Update with minimal lock time
-                            with self.lock:
-                                self.real_time_quotes[ticker_symbol] = quote_data
-
-                                if ticker_symbol not in self.tick_data:
-                                    self.tick_data[ticker_symbol] = []
-
-                                self.tick_data[ticker_symbol].append(tick)
-
-                                # Limit size of tick data
-                                if len(self.tick_data[ticker_symbol]) > 10000:
-                                    self.tick_data[ticker_symbol] = self.tick_data[ticker_symbol][-10000:]
-
-                        except Exception as e:
-                            logger.error(f"Error processing ticker data: {e}")
-
-                    # Get ticker list outside the lock
-                    ticker_names = []
-                    with self.lock:
-                        ticker_names = list(self.watchlist)
-
-                    # Create a new YLiveTicker instance
-                    ticker = YLiveTicker(on_ticker=on_new_msg, ticker_names=ticker_names)
-
-                    # The YLiveTicker constructor starts the WebSocket connection and blocks
-                    # until it's terminated. When it returns, we'll restart if needed.
-                    logger.warning("YLiveTicker connection closed")
-
-                except Exception as e:
-                    logger.error(f"Error in YLiveTicker connection: {e}")
-
-                # Only try to reconnect if we're still meant to be running
-                if self.live_ticker_running:
-                    logger.info("Reconnecting in 5 seconds...")
-                    time.sleep(5)
-
-        # Start the thread
-        self.live_ticker_running = True
-        websocket_thread = threading.Thread(target=websocket_thread)
-        websocket_thread.daemon = True
-        websocket_thread.start()
-
-        # Store the thread for potential cleanup
-        self.websocket_thread = websocket_thread
-
-        logger.info("YLiveTicker thread started")
-
-    def _aggregate_real_time_bars(self):
-        """Aggregate tick data into real-time bars of various timeframes."""
-        while True:
-            try:
-                current_time = datetime.now(pytz.UTC)
-
-                # Get copy of watchlist and tick data outside the lock
-                watchlist_copy = []
-                ticker_data_map = {}
-
-                with self.lock:
-                    watchlist_copy = list(self.watchlist)
-                    # Make deep copies of the tick data we need to process
-                    for ticker in watchlist_copy:
-                        if ticker in self.tick_data and self.tick_data[ticker]:
-                            ticker_data_map[ticker] = self.tick_data[ticker].copy()
-
-                # Process each ticker's data outside the lock
-                updates_to_apply = {}
-
-                for ticker in watchlist_copy:
-                    if ticker not in ticker_data_map:
-                        continue
-
-                    ticks = ticker_data_map[ticker]
-
-                    # Skip if we don't have enough ticks
-                    if len(ticks) < 2:
-                        continue
-
-                    # Prepare updates for each timeframe
-                    ticker_updates = {}
-
-                    for tf_name, tf_config in self.timeframes.items():
-                        interval = tf_config['interval']
-                        minutes = self.interval_to_minutes.get(interval, 5)
-
-                        # Determine the start of the current bar period
-                        bar_start = current_time.replace(
-                            second=0, microsecond=0,
-                            minute=(current_time.minute // minutes) * minutes
-                        )
-
-                        # Get ticks that belong to the current bar
-                        current_bar_ticks = [
-                            t for t in ticks
-                            if t['datetime'] >= bar_start - timedelta(minutes=minutes) and
-                               t['datetime'] < bar_start
-                        ]
-
-                        # Skip if we don't have any ticks for this bar
-                        if not current_bar_ticks:
-                            continue
-
-                        # Create OHLCV bar
-                        prices = [t['price'] for t in current_bar_ticks if t['price'] is not None]
-                        volumes = [t['volume'] for t in current_bar_ticks if 'volume' in t]
-
-                        if not prices:
-                            continue
-
-                        bar = {
-                            'datetime': bar_start - timedelta(minutes=minutes),
-                            'open': prices[0],
-                            'high': max(prices),
-                            'low': min(prices),
-                            'close': prices[-1],
-                            'volume': sum(volumes)
-                        }
-
-                        # Store the computed bar for this timeframe
-                        ticker_updates[tf_name] = bar
-
-                    if ticker_updates:
-                        updates_to_apply[ticker] = ticker_updates
-
-                # Now apply all updates with minimal lock time
-                if updates_to_apply:
-                    with self.lock:
-                        for ticker, tf_updates in updates_to_apply.items():
-                            if ticker not in self.stock_data:
-                                self.stock_data[ticker] = {}
-
-                            for tf_name, bar in tf_updates.items():
-                                if tf_name not in self.stock_data[ticker]:
-                                    self.stock_data[ticker][tf_name] = pd.DataFrame(columns=[
-                                        'datetime', 'open', 'high', 'low', 'close', 'volume'
-                                    ])
-
-                                # Check if we already have a bar for this timeframe and datetime
-                                df = self.stock_data[ticker][tf_name]
-                                existing_bar = df[df['datetime'] == bar['datetime']]
-
-                                if not existing_bar.empty:
-                                    # Update existing bar
-                                    idx = existing_bar.index[0]
-                                    df.at[idx, 'high'] = max(df.at[idx, 'high'], bar['high'])
-                                    df.at[idx, 'low'] = min(df.at[idx, 'low'], bar['low'])
-                                    df.at[idx, 'close'] = bar['close']
-                                    df.at[idx, 'volume'] += bar['volume']
-                                else:
-                                    # Add new bar
-                                    new_row = pd.DataFrame([bar])
-                                    self.stock_data[ticker][tf_name] = pd.concat([df, new_row], ignore_index=True)
-
-                                # Sort and limit size
-                                self.stock_data[ticker][tf_name] = self.stock_data[ticker][tf_name].sort_values('datetime')
-                                if len(self.stock_data[ticker][tf_name]) > 10000:
-                                    self.stock_data[ticker][tf_name] = self.stock_data[ticker][tf_name].tail(10000)
-
-            except Exception as e:
-                logger.error(f"Error in real-time bar aggregation: {e}")
-
-            # Run this process every second
-            time.sleep(1)
-
     def _update_ticker_data(self, ticker, bar_data):
         """Update internal data structure with new bar data and derive higher timeframes."""
         with self.lock:
@@ -398,18 +173,14 @@ class YahooMultiStockCollector:
 
     def _update_derived_timeframes(self, ticker):
         """Derive higher timeframes from base timeframe data."""
-        # Get a copy of the base data with minimal lock time
-        base_data = None
-        with self.lock:
-            if ticker not in self.stock_data or self.base_timeframe not in self.stock_data[ticker]:
-                return
-            base_data = self.stock_data[ticker][self.base_timeframe].copy()
+        if ticker not in self.stock_data or self.base_timeframe not in self.stock_data[ticker]:
+            return
 
+        base_data = self.stock_data[ticker][self.base_timeframe]
         if base_data.empty:
             return
 
-        # Process each timeframe outside the lock
-        derived_data_map = {}
+        # Process each timeframe
         for tf_name, tf_config in self.timeframes.items():
             interval = tf_config['interval']
 
@@ -419,16 +190,14 @@ class YahooMultiStockCollector:
 
             # For lower timeframes than base, fetch directly instead of deriving
             if self.interval_to_minutes.get(interval, 0) < self.interval_to_minutes.get(self.base_timeframe, 0):
+                # Only fetch if we need this timeframe
                 continue
 
-            # Derive higher timeframe data without locks
+            # Derive higher timeframe data
             derived_data = self._aggregate_timeframe(base_data, interval)
-            derived_data_map[tf_name] = derived_data
 
-        # Update with minimal lock time
-        with self.lock:
-            for tf_name, derived_data in derived_data_map.items():
-                self.stock_data[ticker][tf_name] = derived_data
+            # Store derived data
+            self.stock_data[ticker][tf_name] = derived_data
 
     def _aggregate_timeframe(self, base_data, target_interval):
         """Aggregate lower timeframe data to higher timeframe."""
@@ -469,44 +238,23 @@ class YahooMultiStockCollector:
 
     def add_stock(self, ticker_symbol):
         """Add a stock to the watchlist and persist to database."""
-        # Validate ticker symbol before adding - do this outside any locks
+        # Validate ticker symbol before adding
         if not self._validate_ticker(ticker_symbol):
             logger.warning(f"Invalid ticker symbol: {ticker_symbol}")
             return False
 
-        # First check if the ticker is already in our watchlist
-        ticker_added = False
-        should_initialize = False
-
-        # Use a minimal lock to update the watchlist
-        with self.lock:
-            if ticker_symbol not in self.watchlist:
-                self.watchlist.add(ticker_symbol)
-                ticker_added = True
-                should_initialize = True
-
-        # Do database operations outside the lock
-        if ticker_added and self.db_manager:
-            self.db_manager.add_to_watchlist(ticker_symbol)
-
-        # Initialize historical data outside the lock
-        if should_initialize:
+        if ticker_symbol not in self.watchlist:
+            self.watchlist.add(ticker_symbol)
+            # Also add to database if db_manager is available
+            if self.db_manager:
+                self.db_manager.add_to_watchlist(ticker_symbol)
+            # Initialize historical data for this ticker
             self._initialize_ticker_data(ticker_symbol)
-
-            # Signal ticker restart without holding a lock
-            self._restart_live_ticker()
-
             logger.info(f"Added {ticker_symbol} to watchlist")
             return True
         else:
             logger.info(f"{ticker_symbol} already in watchlist")
             return False
-
-    def _restart_live_ticker(self):
-        """Restart the YLiveTicker connection with updated watchlist."""
-        # No locks needed here - just setting a flag
-        self.live_ticker_running = False
-        logger.info("Signaled YLiveTicker to restart with updated watchlist")
 
     def _validate_ticker(self, ticker_symbol):
         """Validate if ticker symbol exists in Yahoo Finance."""
@@ -523,29 +271,36 @@ class YahooMultiStockCollector:
 
     def _initialize_ticker_data(self, ticker_symbol):
         """Initialize historical data for a ticker symbol using yfinance."""
+        # Determine how much data we need based on the longest timeframe
+        max_minutes = max(self.interval_to_minutes.get(tf_config['interval'], 1)
+                          for tf_config in self.timeframes.values())
+
+        # Calculate how many days of data we need
+        bars_needed = max_minutes * 100  # Get enough bars for indicators
+        days_back = max(1, int(bars_needed / (6.5 * 60)))  # Trading hours per day
+
+        # Limit days_back to 7 days to avoid API limits
+        days_back = min(7, days_back)
+
         try:
-            # Determine how much data we need - do this outside any locks
-            max_minutes = max(self.interval_to_minutes.get(tf_config['interval'], 1)
-                              for tf_config in self.timeframes.values())
-
-            # Calculate how many days of data we need
-            bars_needed = max_minutes * 100  # Get enough bars for indicators
-            days_back = max(1, int(bars_needed / (6.5 * 60)))  # Trading hours per day
-            days_back = min(7, days_back)  # Limit to 7 days
-
-            # Fetch data outside any locks
-            data = None
+            # Use yfinance to get historical data with chunking for 1m data
             if self.base_timeframe == '1m':
+                # For 1m data, we need to chunk the requests to avoid API limits
                 data = self._fetch_chunked_historical_data(
-                    ticker_symbol, days_back=days_back, interval=self.base_timeframe
+                    ticker_symbol,
+                    days_back=days_back,
+                    interval=self.base_timeframe
                 )
             else:
+                # For other timeframes, we can use a single request
                 data = self._fetch_yfinance_historical_data(
-                    ticker_symbol, period=f"{days_back+1}d", interval=self.base_timeframe
+                    ticker_symbol,
+                    period=f"{days_back+1}d",  # Add extra day for safety
+                    interval=self.base_timeframe
                 )
 
-            # Only lock when updating the internal data structures
             if data is not None and not data.empty:
+                # Store in our data structure
                 with self.lock:
                     if ticker_symbol not in self.stock_data:
                         self.stock_data[ticker_symbol] = {}
@@ -553,8 +308,8 @@ class YahooMultiStockCollector:
                     # Store base timeframe data
                     self.stock_data[ticker_symbol][self.base_timeframe] = data
 
-                # Update derived timeframes with minimal locking
-                self._update_derived_timeframes(ticker_symbol)
+                    # Derive all other timeframes
+                    self._update_derived_timeframes(ticker_symbol)
             else:
                 logger.warning(f"No data available for {ticker_symbol}")
 
@@ -718,17 +473,6 @@ class YahooMultiStockCollector:
                 if ticker_symbol in self.stock_data:
                     del self.stock_data[ticker_symbol]
 
-                # Remove from real-time quotes
-                if ticker_symbol in self.real_time_quotes:
-                    del self.real_time_quotes[ticker_symbol]
-
-                # Remove from tick data
-                if ticker_symbol in self.tick_data:
-                    del self.tick_data[ticker_symbol]
-
-                # Signal to restart YLiveTicker
-                self._restart_live_ticker()
-
                 logger.info(f"Removed {ticker_symbol} from watchlist")
                 return True
             else:
@@ -742,51 +486,44 @@ class YahooMultiStockCollector:
     def get_data(self, ticker_symbol, interval='5m'):
         """
         Get data for a specific ticker and interval.
-        For real-time data, it prefers the latest real-time bars when available,
-        then falls back to historical data from yfinance.
+        Retrieves from cache/memory first, then derives from base data if possible,
+        finally falls back to API only when necessary.
         """
-        # Check for cached real-time data first with minimal lock time
-        df_to_return = None
-        matching_tf = None
+        # Validate interval
+        if interval not in self.interval_to_minutes:
+            logger.warning(f"Invalid interval: {interval}. Using {self.base_timeframe} instead.")
+            interval = self.base_timeframe
 
-        # Find the matching timeframe for this interval
-        for tf_name, tf_config in self.timeframes.items():
-            if tf_config['interval'] == interval:
-                matching_tf = tf_name
-                break
-
-        # Try to get data with minimal locking
         with self.lock:
-            # If we have the data already in our cache
+            # Find the timeframe that matches this interval
+            matching_tf = None
+            for tf_name, tf_config in self.timeframes.items():
+                if tf_config['interval'] == interval:
+                    matching_tf = tf_name
+                    break
+
+            # Check if we have the exact timeframe data already
             if matching_tf and ticker_symbol in self.stock_data and matching_tf in self.stock_data[ticker_symbol]:
-                df_to_return = self.stock_data[ticker_symbol][matching_tf].copy()
-            elif interval == self.base_timeframe and ticker_symbol in self.stock_data and interval in self.stock_data[ticker_symbol]:
-                df_to_return = self.stock_data[ticker_symbol][interval].copy()
+                return self.stock_data[ticker_symbol][matching_tf].copy()
 
-        # If we found data in our cache, return it
-        if df_to_return is not None and not df_to_return.empty:
-            return df_to_return
+            # If requesting base timeframe data directly
+            if interval == self.base_timeframe and ticker_symbol in self.stock_data and interval in self.stock_data[ticker_symbol]:
+                return self.stock_data[ticker_symbol][interval].copy()
 
-        # For derivable timeframes, try to derive from base data
-        if self.interval_to_minutes.get(interval, 0) >= self.interval_to_minutes.get(self.base_timeframe, 0):
-            base_data = None
-            with self.lock:
+            # For a timeframe that's higher than our base, derive it
+            if self.interval_to_minutes.get(interval, 0) >= self.interval_to_minutes.get(self.base_timeframe, 0):
                 if ticker_symbol in self.stock_data and self.base_timeframe in self.stock_data[ticker_symbol]:
-                    base_data = self.stock_data[ticker_symbol][self.base_timeframe].copy()
+                    base_data = self.stock_data[ticker_symbol][self.base_timeframe]
+                    if not base_data.empty:
+                        derived_data = self._aggregate_timeframe(base_data, interval)
 
-            if base_data is not None and not base_data.empty:
-                derived_data = self._aggregate_timeframe(base_data, interval)
+                        # Cache this derived data for future use
+                        if matching_tf:
+                            self.stock_data[ticker_symbol][matching_tf] = derived_data
 
-                # Cache the derived data for future use
-                if matching_tf:
-                    with self.lock:
-                        if ticker_symbol not in self.stock_data:
-                            self.stock_data[ticker_symbol] = {}
-                        self.stock_data[ticker_symbol][matching_tf] = derived_data
+                        return derived_data
 
-                return derived_data
-
-        # If we get here, we need to fetch from yfinance
+        # If we need to fetch the data directly (either lower timeframe or missing data)
         # Determine appropriate period based on interval
         period = "5d"  # Default period
         if interval in ['1d', '5d', '1wk', '1mo']:
@@ -797,11 +534,15 @@ class YahooMultiStockCollector:
         # For 1m data, use chunked approach to avoid limits
         if interval == '1m':
             return self._fetch_chunked_historical_data(
-                ticker_symbol, days_back=7, interval=interval
+                ticker_symbol,
+                days_back=7,  # Yahoo's limit
+                interval=interval
             )
         else:
             return self._fetch_yfinance_historical_data(
-                ticker_symbol, period=period, interval=interval
+                ticker_symbol,
+                period=period,
+                interval=interval
             )
 
     def get_multi_timeframe_data(self, ticker_symbol):
@@ -914,18 +655,6 @@ class YahooMultiStockCollector:
                     'indicators': indicators
                 }
 
-        # Also include the real-time data if available
-        with self.lock:
-            if ticker_symbol in self.real_time_quotes:
-                rt_data = self.real_time_quotes[ticker_symbol]
-                summaries['real_time'] = {
-                    'last_price': rt_data.get('price'),
-                    'last_update': rt_data.get('datetime'),
-                    'day_high': rt_data.get('high'),
-                    'day_low': rt_data.get('low'),
-                    'volume': rt_data.get('volume')
-                }
-
         return {
             'ticker': ticker_symbol,
             'timeframes': summaries
@@ -941,110 +670,58 @@ class YahooMultiStockCollector:
     def get_latest_prices(self):
         """Get the latest price for each stock in watchlist across all timeframes."""
         latest_prices = {}
+        for ticker in self.watchlist:
+            # Get live price using yfinance directly
+            try:
+                ticker_obj = yf.Ticker(ticker)
+                live_data = ticker_obj.history(period="1d", interval="1m").tail(1)
 
-        # Get a copy of the watchlist to avoid long lock times
-        watchlist_copy = []
-        with self.lock:
-            watchlist_copy = list(self.watchlist)
+                if not live_data.empty:
+                    # Format the live data
+                    latest_row = live_data.iloc[0]
+                    live_price = {
+                        'datetime': live_data.index[0],
+                        'open': latest_row['Open'],
+                        'high': latest_row['High'],
+                        'low': latest_row['Low'],
+                        'price': latest_row['Close'],
+                        'volume': latest_row['Volume']
+                    }
 
-        # Process each ticker
-        for ticker in watchlist_copy:
-            ticker_data = {}
-            has_real_time = False
-            real_time_quote = None
+                    latest_prices[ticker] = {'live': live_price}
 
-            # Check for real-time data with minimal lock time
-            with self.lock:
-                has_real_time = ticker in self.real_time_quotes
-                if has_real_time:
-                    real_time_quote = self.real_time_quotes[ticker].copy()
-
-            # If we have real-time data
-            if has_real_time and real_time_quote:
-                ticker_data['real_time'] = {
-                    'datetime': real_time_quote.get('datetime'),
-                    'price': real_time_quote.get('price'),
-                    'open': real_time_quote.get('open'),
-                    'high': real_time_quote.get('high'),
-                    'low': real_time_quote.get('low'),
-                    'volume': real_time_quote.get('volume')
-                }
-
-                # Get data for other timeframes
-                timeframe_data = {}
-                with self.lock:
-                    for tf_name, tf_config in self.timeframes.items():
-                        if ticker in self.stock_data and tf_name in self.stock_data[ticker]:
-                            df = self.stock_data[ticker][tf_name]
-                            if not df.empty:
-                                latest_row = df.iloc[-1]
-                                timeframe_data[tf_name] = {
-                                    'datetime': latest_row['datetime'],
-                                    'open': latest_row['open'],
-                                    'high': latest_row['high'],
-                                    'low': latest_row['low'],
-                                    'price': latest_row['close'],
-                                    'volume': latest_row['volume']
-                                }
-
-                # Add timeframe data
-                ticker_data.update(timeframe_data)
-
-            else:
-                # No real-time data, fall back to yfinance
-                try:
-                    ticker_obj = yf.Ticker(ticker)
-                    live_data = ticker_obj.history(period="1d", interval="1m").tail(1)
-
-                    if not live_data.empty:
-                        # Format the live data
-                        latest_row = live_data.iloc[0]
-                        ticker_data['yfinance_live'] = {
-                            'datetime': live_data.index[0],
-                            'open': latest_row['Open'],
-                            'high': latest_row['High'],
-                            'low': latest_row['Low'],
-                            'price': latest_row['Close'],
-                            'volume': latest_row['Volume']
-                        }
-
-                        # Get data for all timeframes from our cache
-                        all_data = self.get_multi_timeframe_data(ticker)
-                        for timeframe, data in all_data.items():
-                            if not data.empty:
-                                tf_latest_row = data.iloc[-1]
-                                ticker_data[timeframe] = {
-                                    'datetime': tf_latest_row['datetime'],
-                                    'open': tf_latest_row['open'],
-                                    'high': tf_latest_row['high'],
-                                    'low': tf_latest_row['low'],
-                                    'price': tf_latest_row['close'],
-                                    'volume': tf_latest_row['volume']
-                                }
-                except Exception as e:
-                    logger.error(f"Error getting latest price for {ticker}: {e}")
-
-                    # Fallback to our stored data
+                    # Also get data for all timeframes
                     all_data = self.get_multi_timeframe_data(ticker)
-                    timeframe_data = {}
                     for timeframe, data in all_data.items():
                         if not data.empty:
-                            latest_row = data.iloc[-1]
-                            timeframe_data[timeframe] = {
-                                'datetime': latest_row['datetime'],
-                                'open': latest_row['open'],
-                                'high': latest_row['high'],
-                                'low': latest_row['low'],
-                                'price': latest_row['close'],
-                                'volume': latest_row['volume']
+                            tf_latest_row = data.iloc[-1]
+                            latest_prices[ticker][timeframe] = {
+                                'datetime': tf_latest_row['datetime'],
+                                'open': tf_latest_row['open'],
+                                'high': tf_latest_row['high'],
+                                'low': tf_latest_row['low'],
+                                'price': tf_latest_row['close'],
+                                'volume': tf_latest_row['volume']
                             }
+            except Exception as e:
+                logger.error(f"Error getting latest price for {ticker}: {e}")
+                # Fallback to our stored data
+                all_data = self.get_multi_timeframe_data(ticker)
+                ticker_prices = {}
+                for timeframe, data in all_data.items():
+                    if not data.empty:
+                        latest_row = data.iloc[-1]
+                        ticker_prices[timeframe] = {
+                            'datetime': latest_row['datetime'],
+                            'open': latest_row['open'],
+                            'high': latest_row['high'],
+                            'low': latest_row['low'],
+                            'price': latest_row['close'],
+                            'volume': latest_row['volume']
+                        }
 
-                    if timeframe_data:
-                        ticker_data = timeframe_data
-
-            # Add to results if we got data
-            if ticker_data:
-                latest_prices[ticker] = ticker_data
+                if ticker_prices:
+                    latest_prices[ticker] = ticker_prices
 
         return latest_prices
 
@@ -1231,46 +908,8 @@ class YahooMultiStockCollector:
         logger.info("API cache cleared")
         return True
 
-    def is_live_ticker_running(self):
-        """Check if the live ticker is running."""
-        return self.live_ticker_running
-
-    def get_real_time_stats(self):
-        """Get statistics about real-time data collection."""
-        stats = {
-            'live_ticker_running': self.live_ticker_running,
-            'tickers_with_real_time_data': 0,
-            'total_ticks_received': 0,
-            'latest_tick_times': {}
-        }
-
-        with self.lock:
-            # Count tickers with real-time data
-            tickers_with_data = 0
-            total_ticks = 0
-
-            for ticker, ticks in self.tick_data.items():
-                if ticks:
-                    tickers_with_data += 1
-                    total_ticks += len(ticks)
-
-                    # Get the latest tick time
-                    if ticks:
-                        latest_tick = ticks[-1]
-                        stats['latest_tick_times'][ticker] = latest_tick.get('datetime')
-
-            stats['tickers_with_real_time_data'] = tickers_with_data
-            stats['total_ticks_received'] = total_ticks
-
-        return stats
-
     def close(self):
         """Clean up resources."""
-        logger.info("Shutting down YahooMultiStockCollector...")
-
-        # Flag threads to stop
-        self.live_ticker_running = False
-
         # Wait for threads to finish
         if self.cache_thread and self.cache_thread.is_alive():
             self.cache_thread.join(timeout=1)
@@ -1278,10 +917,6 @@ class YahooMultiStockCollector:
         if self.processing_thread and self.processing_thread.is_alive():
             self.processing_thread.join(timeout=1)
 
-        if self.live_ticker_thread and self.live_ticker_thread.is_alive():
-            self.live_ticker_thread.join(timeout=1)
-
-        if self.bar_aggregation_thread and self.bar_aggregation_thread.is_alive():
-            self.bar_aggregation_thread.join(timeout=1)
-
         logger.info("YahooMultiStockCollector closed successfully")
+
+
