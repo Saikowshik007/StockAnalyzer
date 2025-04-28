@@ -202,7 +202,7 @@ class YahooMultiStockCollector:
                 # Check if we need to resubscribe
                 if self.ws_connected and not self._check_subscriptions():
                     logger.info("Resubscribing to watchlist tickers")
-                    self._subscribe_watchlist()
+                    # self._subscribe_watchlist()
 
                 # Ping to keep connection alive
                 try:
