@@ -89,6 +89,7 @@ class FinancialMonitorApp:
             self.db_manager.add_to_watchlist(ticker)
             self.stock_collector.add_stock(ticker)
 
+
     def run_stock_collector(self):
         """Run the stock collector."""
         try:
@@ -98,7 +99,16 @@ class FinancialMonitorApp:
                 daemon=True
             )
             collector_thread.start()
-            logger.info("Stock collector started in isolated thread")
+
+            # Wait for connection to be established (with timeout)
+            start_time = time.time()
+            while not self.stock_collector.connected and time.time() - start_time < 30:
+                time.sleep(0.1)
+
+            if not self.stock_collector.connected:
+                logger.warning("WebSocket connection not established after timeout. Bot may have issues.")
+            else:
+                logger.info("Stock collector WebSocket connected successfully")
         except Exception as e:
             logger.error(f"Error running stock collector: {e}")
 
