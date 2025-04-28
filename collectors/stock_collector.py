@@ -20,6 +20,7 @@ class YahooMultiStockCollector:
         self.base_url = "https://query1.finance.yahoo.com"
         self.ws_url = "wss://streamer.finance.yahoo.com"  # Yahoo Finance WebSocket URL
         self.watchlist = set()
+        self.watchlist.add("SPY")
         self.db_manager = db_manager
         self.lock = threading.Lock()
 
@@ -207,8 +208,7 @@ class YahooMultiStockCollector:
                 # Ping to keep connection alive
                 try:
                     if self.ws_connected:
-                        # self.ws.send('ping')
-                        logger.info("Connected")
+                        self.ws.ping("keepalive")
                 except Exception as e:
                     logger.error(f"Error sending ping: {e}")
                     self.ws_connected = False
