@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Dict
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, ContextTypes, CallbackQueryHandler, MessageHandler, filters
 from telegram.constants import ParseMode
 from services.pattern_recognition import TalibPatternRecognition
 
@@ -590,6 +590,18 @@ class TelegramBot:
 
             self.application = Application.builder().token(self.token).build()
 
+            # Add error handler
+    async def error_handler(self,update, context):
+        logger.error(f"Update {update} caused error: {context.error}", exc_info=context.error)
+
+    async def log_update(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Log all updates to help with debugging."""
+        logger.info(f"Received update: {update}")
+        # Continue processing with next handler
+        return None
+
+
+
 
     async def run_async(self):
         """Run the bot in an existing event loop."""
@@ -612,12 +624,10 @@ class TelegramBot:
             self.application.add_handler(CommandHandler("tickersentiment", self.ticker_sentiment))
             self.application.add_handler(CommandHandler("analyze", self.analyze))
             self.application.add_handler(CallbackQueryHandler(self.button_callback))
+            self.application.add_error_handler(self.error_handler)
+            self.application.add_handler(MessageHandler(filters.ALL, self.log_update), group=-999)
 
-            # Add error handler
-            async def error_handler(update, context):
-                logger.error(f"Update {update} caused error: {context.error}", exc_info=context.error)
 
-            self.application.add_error_handler(error_handler)
 
             # Initialize and start the application
             logger.info("Initializing Telegram bot application")
@@ -627,7 +637,17 @@ class TelegramBot:
 
             # Start polling with minimal parameters
             logger.info("Starting polling")
-            await self.application.updater.start_polling()
+            await self.application.updater.start_polling(
+                poll_interval=0.5,
+                timeout=10,
+                bootstrap_retries=-1,
+                read_timeout=15,
+                write_timeout=15,
+                connect_timeout=15,
+                pool_timeout=None,
+                allowed_updates=Update.ALL_TYPES,
+                drop_pending_updates=False
+            )
             logger.info("Polling started successfully")
 
             # Keep the application running
