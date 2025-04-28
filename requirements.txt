@@ -7,9 +7,8 @@ lxml_html_clean
 peft
 protobuf
 sentencepiece
-python-telegram-bot~=22.0
+python-telegram-bot
 torch
-telegram~=0.0.1
 numpy~=1.26.4
 openai
 yfinance

@@ -236,7 +236,7 @@ class YahooMultiStockCollector:
                     # For real-time ticks, you might need to convert to OHLC yourself
                     # This is a simplified approach
                     price = item.get('price')
-                    volume = item.get('volume', 0)
+                    volume = item.get('dayVolume', 0)
 
                     if price is None:
                         continue
