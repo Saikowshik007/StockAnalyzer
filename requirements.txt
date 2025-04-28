@@ -16,3 +16,4 @@ yfinance
 sqlalchemy
 hf_xet
 websocket-client
+protobuf==3.20.*
