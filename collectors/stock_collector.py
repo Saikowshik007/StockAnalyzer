@@ -18,7 +18,6 @@ pd.set_option('future.no_silent_downcasting', True)
 class YahooMultiStockCollector:
     def __init__(self, db_manager=None):
         self.watchlist = set()
-        self.watchlist.add("SPY")
         self.db_manager = db_manager
         self.lock = threading.Lock()
 

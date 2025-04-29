@@ -237,34 +237,280 @@ class TelegramBot:
         await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
 
     async def watchlist(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /watchlist command."""
+        """Enhanced watchlist command with key insights for each ticker."""
         watchlist = self.db_manager.get_active_watchlist()
 
         if not watchlist:
-            await update.message.reply_text("Your watchlist is empty.")
+            await update.message.reply_text("Your watchlist is empty. Add stocks with /add TICKER")
             return
 
-        message = "📋 *Current Watchlist*\n\n"
+        message = "📋 *WATCHLIST SUMMARY*\n\n"
+
+        # Get multi-timeframe prices and technical data for all tickers
+        all_prices = self.stock_collector.get_latest_prices()
+
+        # Get sentiment data if available
+        sentiment_data = {}
+        if hasattr(self, 'sentiment_tracker'):
+            try:
+                for ticker in watchlist:
+                    ticker_sentiment = self.sentiment_tracker.get_ticker_sentiment(ticker)
+                    if ticker_sentiment:
+                        sentiment_data[ticker] = ticker_sentiment
+            except Exception as e:
+                logger.error(f"Error getting sentiment data: {e}")
+
+        # Process each ticker
+        watchlist_items = []
+
         for ticker in watchlist:
-            # Get multi-timeframe prices
-            multi_prices = self.stock_collector.get_latest_prices()
-            ticker_data = multi_prices.get(ticker, {})
+            item = {"ticker": ticker}
 
-            if 'short_term' in ticker_data:
-                latest_price = ticker_data['short_term'].get('price', 'N/A')
+            # Get price data
+            if ticker in all_prices:
+                ticker_data = all_prices[ticker]
+
+                # Find the most recent price
+                current_price = None
+                for tf in ['short_term', 'medium_term', 'long_term', 'very_short_term']:
+                    if tf in ticker_data and ticker_data[tf].get('price') is not None:
+                        current_price = ticker_data[tf].get('price')
+
+                        # Try to get day change if available
+                        if 'open' in ticker_data[tf] and ticker_data[tf]['open'] is not None:
+                            open_price = ticker_data[tf]['open']
+                            if open_price > 0:
+                                day_change = ((current_price / open_price) - 1) * 100
+                                item['day_change'] = day_change
+                        break
+
+                item['price'] = current_price
+
+            # Get technical signals
+            tech_signals = {"bullish": 0, "bearish": 0, "neutral": 0}
+
+            try:
+                # Get multi-timeframe data
+                all_data = self.stock_collector.get_multi_timeframe_data(ticker)
+
+                for timeframe, data in all_data.items():
+                    if data.empty:
+                        continue
+
+                    # Calculate indicators
+                    indicators = self.stock_collector.calculate_technical_indicators(data)
+
+                    if not indicators:
+                        continue
+
+                    # RSI
+                    if 'rsi' in indicators:
+                        rsi = indicators['rsi']
+                        if isinstance(rsi, (int, float)):
+                            if rsi < 30:
+                                tech_signals['bullish'] += 1
+                            elif rsi > 70:
+                                tech_signals['bearish'] += 1
+                            else:
+                                tech_signals['neutral'] += 1
+
+                    # MACD
+                    if all(k in indicators for k in ['macd', 'macd_signal', 'macd_hist']):
+                        hist = indicators['macd_hist']
+                        if isinstance(hist, (int, float)):
+                            if hist > 0:
+                                tech_signals['bullish'] += 1
+                            else:
+                                tech_signals['bearish'] += 1
+
+                    # MA Trend
+                    if 'ma_trend' in indicators:
+                        ma_trend = indicators['ma_trend']
+                        if ma_trend == 'bullish':
+                            tech_signals['bullish'] += 1
+                        elif ma_trend == 'bearish':
+                            tech_signals['bearish'] += 1
+                        else:
+                            tech_signals['neutral'] += 1
+            except Exception as e:
+                logger.error(f"Error calculating technical signals for {ticker}: {e}")
+
+            item['tech_signals'] = tech_signals
+
+            # Set technical bias
+            if tech_signals['bullish'] > tech_signals['bearish'] * 1.5:
+                item['tech_bias'] = "BULLISH"
+            elif tech_signals['bearish'] > tech_signals['bullish'] * 1.5:
+                item['tech_bias'] = "BEARISH"
+            elif tech_signals['bullish'] > tech_signals['bearish']:
+                item['tech_bias'] = "SLIGHTLY BULLISH"
+            elif tech_signals['bearish'] > tech_signals['bullish']:
+                item['tech_bias'] = "SLIGHTLY BEARISH"
             else:
-                latest_price = 'N/A'
+                item['tech_bias'] = "NEUTRAL"
 
-            message += f"• {ticker}: ${latest_price}\n"
+            # Get sentiment data
+            if ticker in sentiment_data:
+                item['sentiment'] = sentiment_data[ticker]['value']
+                item['sentiment_status'] = sentiment_data[ticker]['status']
+
+            # Get pattern signals
+            pattern_signals = {"bullish": 0, "bearish": 0, "neutral": 0}
+
+            try:
+                # Check for patterns in the shortest timeframe available
+                for timeframe in ['short_term', 'medium_term', 'long_term']:
+                    if timeframe in all_data and not all_data[timeframe].empty:
+                        patterns = self.pattern_recognizer.detect_patterns(all_data[timeframe], lookback_periods=3)
+
+                        if patterns:
+                            for pattern_name, occurrences in patterns.items():
+                                if occurrences:
+                                    for occurrence in occurrences:
+                                        signal = occurrence['signal']
+                                        if signal > 0:
+                                            pattern_signals['bullish'] += 1
+                                        elif signal < 0:
+                                            pattern_signals['bearish'] += 1
+                                        else:
+                                            pattern_signals['neutral'] += 1
+                        break
+            except Exception as e:
+                logger.error(f"Error detecting patterns for {ticker}: {e}")
+
+            item['pattern_signals'] = pattern_signals
+
+            # Generate overall signal
+            bullish_count = 0
+            bearish_count = 0
+
+            # Count technical bias
+            if 'tech_bias' in item:
+                if "BULLISH" in item['tech_bias']:
+                    bullish_count += 1
+                elif "BEARISH" in item['tech_bias']:
+                    bearish_count += 1
+
+            # Count pattern signals
+            if pattern_signals['bullish'] > pattern_signals['bearish']:
+                bullish_count += 1
+            elif pattern_signals['bearish'] > pattern_signals['bullish']:
+                bearish_count += 1
+
+            # Count sentiment
+            if 'sentiment' in item:
+                if item['sentiment'] >= 6.5:
+                    bullish_count += 1
+                elif item['sentiment'] <= 4.0:
+                    bearish_count += 1
+
+            # Set overall signal
+            if bullish_count >= 2 and bearish_count == 0:
+                item['signal'] = "BUY"
+            elif bullish_count > bearish_count:
+                item['signal'] = "BULLISH"
+            elif bearish_count >= 2 and bullish_count == 0:
+                item['signal'] = "SELL"
+            elif bearish_count > bullish_count:
+                item['signal'] = "BEARISH"
+            else:
+                item['signal'] = "NEUTRAL"
+
+            watchlist_items.append(item)
+
+        # Sort watchlist items by signal priority: BUY, BULLISH, SELL, BEARISH, NEUTRAL
+        signal_priority = {"BUY": 0, "BULLISH": 1, "SELL": 2, "BEARISH": 3, "NEUTRAL": 4}
+        watchlist_items.sort(key=lambda x: signal_priority.get(x.get('signal', "NEUTRAL"), 5))
+
+        # Format watchlist table
+        for item in watchlist_items:
+            ticker = item['ticker']
+
+            # Format price and change
+            price_str = f"${item['price']:.2f}" if 'price' in item and item['price'] is not None else "N/A"
+
+            # Add change with emoji if available
+            if 'day_change' in item:
+                change = item['day_change']
+                change_emoji = "🔼" if change > 0 else "🔽" if change < 0 else "➖"
+                price_str += f" {change_emoji} {change:.2f}%"
+
+            # Format signal with emoji
+            signal = item.get('signal', "NEUTRAL")
+            if signal == "BUY":
+                signal_emoji = "🟢"
+            elif signal == "BULLISH":
+                signal_emoji = "🟢"
+            elif signal == "SELL":
+                signal_emoji = "🔴"
+            elif signal == "BEARISH":
+                signal_emoji = "🔴"
+            else:
+                signal_emoji = "⚪"
+
+            # Add sentiment emoji if available
+            sentiment_emoji = ""
+            if 'sentiment' in item:
+                sentiment = item['sentiment']
+                if sentiment >= 7.0:
+                    sentiment_emoji = "😀"
+                elif sentiment >= 6.0:
+                    sentiment_emoji = "🙂"
+                elif sentiment <= 3.0:
+                    sentiment_emoji = "😞"
+                elif sentiment <= 4.0:
+                    sentiment_emoji = "🙁"
+                else:
+                    sentiment_emoji = "😐"
+
+            # Format insights
+            insights = []
+
+            # Technical indicators insight
+            if 'tech_bias' in item:
+                insights.append(f"Tech: {item['tech_bias'].lower()}")
+
+            # Pattern insight
+            pattern_signals = item.get('pattern_signals', {})
+            if pattern_signals.get('bullish', 0) > 0 or pattern_signals.get('bearish', 0) > 0:
+                bullish = pattern_signals.get('bullish', 0)
+                bearish = pattern_signals.get('bearish', 0)
+                if bullish > bearish:
+                    insights.append(f"{bullish} bullish patterns")
+                elif bearish > bullish:
+                    insights.append(f"{bearish} bearish patterns")
+
+            # Sentiment insight if available
+            if 'sentiment_status' in item:
+                insights.append(f"Sentiment: {item['sentiment_status'].lower()}")
+
+            # Format final insights text
+            insights_text = ", ".join(insights) if insights else "No insights available"
+
+            # Add to message
+            message += f"{signal_emoji} *{self.escape_markdown(ticker)}*  {self.escape_markdown(price_str)} {sentiment_emoji}\n"
+            message += f"  {self.escape_markdown(insights_text)}\n\n"
+
+        # Add command suggestions
+        message += "*Commands:*\n"
+        message += "• For detailed insights: `/analyze TICKER`\n"
+        message += "• For pattern analysis: `/pattern TICKER`\n"
+        message += "• For price details: `/price TICKER`\n"
+        message += "• For sentiment analysis: `/tickersentiment TICKER`\n\n"
 
         # Create inline keyboard for easy management
         keyboard = [
-            [InlineKeyboardButton(f"Remove {ticker}", callback_data=f"remove_{ticker}")]
+            [InlineKeyboardButton(f"🔍 Analyze {ticker}", callback_data=f"analyze_{ticker}"),
+             InlineKeyboardButton(f"❌ Remove {ticker}", callback_data=f"remove_{ticker}")]
             for ticker in watchlist
         ]
+
+        # Add a "Refresh" button
+        keyboard.append([InlineKeyboardButton("🔄 Refresh Watchlist", callback_data="refresh_watchlist")])
+
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+        await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup)
 
     async def add_stock(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /add <ticker> command."""
@@ -291,93 +537,280 @@ class TelegramBot:
             await update.message.reply_text(f"{ticker} not found in watchlist")
 
     async def price(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /price <ticker> command with multi-timeframe data."""
+        """Enhanced price analysis with multi-timeframe data and technical context."""
         if not context.args:
             await update.message.reply_text("Please provide a ticker symbol: /price AAPL")
             return
         ticker = context.args[0].upper()
+
         # Get multi-timeframe data
         all_prices = self.stock_collector.get_latest_prices()
+        all_data = self.stock_collector.get_multi_timeframe_data(ticker)
+
         if ticker not in all_prices or not all_prices[ticker]:
-            await update.message.reply_text(f"No price data available for {ticker}. You might need to add it to your watchlist first.")
+            await update.message.reply_text(f"No price data available for {ticker}\\. You might need to add it to your watchlist first\\.")
             return
+
         ticker_data = all_prices[ticker]
-        message = f"💰 *{self.escape_markdown(ticker)} Multi\\-Timeframe Analysis*\n\n"
-        # Format each timeframe
+        message = f"💰 *{self.escape_markdown(ticker)} Price Analysis*\n\n"
+
+        # Get current price for reference
+        current_price = None
+        if 'short_term' in ticker_data:
+            current_price = ticker_data['short_term'].get('price', None)
+
+        if current_price:
+            message += f"*Current Price:* ${self.escape_markdown(f'{current_price:.2f}')}\n\n"
+
+        # Add historical context - calculate changes across timeframes
+        message += "*Price Changes:*\n"
+
         timeframe_names = {
-            'long_term': '📅 Hourly',
-            'medium_term': '🕐 15 minute',
-            'short_term': '⏱️ 5 minute',
-            "very_short_term": '⏱️ 2 minute'
+            'long_term': '1h',
+            'medium_term': '15m',
+            'short_term': '5m',
+            'very_short_term': '2m'
         }
-        for timeframe, price_info in ticker_data.items():
-            display_name = timeframe_names.get(timeframe, timeframe)
-            message += f"{self.escape_markdown(display_name)}:\n"
 
-            # Extract values safely before formatting
-            price_val = price_info.get('price', 0)
-            open_val = price_info.get('open', 0)
-            high_val = price_info.get('high', 0)
-            low_val = price_info.get('low', 0)
-            volume_val = price_info.get('volume', 0)
-            datetime_val = price_info.get('datetime')
+        # Calculate and show price changes
+        for tf_name, tf_display in timeframe_names.items():
+            if tf_name in all_data and not all_data[tf_name].empty:
+                df = all_data[tf_name]
+                if len(df) > 1:
+                    current = df['close'].iloc[-1]
 
-            # Format values first, then escape markdown
-            price_str = self.escape_markdown(f'${price_val:.2f}')
-            open_str = self.escape_markdown(f'{open_val:,}')
-            high_str = self.escape_markdown(f'{high_val:,}')
-            low_str = self.escape_markdown(f'{low_val:,}')
-            volume_str = self.escape_markdown(f'{volume_val:,}')
+                    # Calculate changes for different lookback periods
+                    changes = {}
+                    lookbacks = {
+                        '1 period': 1,
+                        '5 periods': min(5, len(df) - 1),
+                        '20 periods': min(20, len(df) - 1)
+                    }
 
-            # Ensure datetime is handled safely
-            if datetime_val:
-                time_str = self.escape_markdown(datetime_val.strftime('%Y-%m-%d %H:%M'))
-            else:
-                time_str = "N/A"
+                    for period_name, periods in lookbacks.items():
+                        if len(df) > periods:
+                            previous = df['close'].iloc[-periods-1]
+                            pct_change = ((current / previous) - 1) * 100
+                            changes[period_name] = pct_change
 
-            # Add formatted values to message
-            message += f"  Price: {price_str}\n"
-            message += f"  Open: {open_str}\n"
-            message += f"  High: {high_str}\n"
-            message += f"  Low: {low_str}\n"
-            message += f"  Volume: {volume_str}\n"
-            message += f"  Time: {time_str}\n\n"
+                    # Only show this timeframe if we have change data
+                    if changes:
+                        message += f"*{self.escape_markdown(tf_display)}:* "
+
+                        for period, change in changes.items():
+                            # Format with arrow and color indicator
+                            if change > 0:
+                                arrow = "🔼"
+                            elif change < 0:
+                                arrow = "🔽"
+                            else:
+                                arrow = "➖"
+
+                            message += f"{arrow}{self.escape_markdown(f'{change:.2f}%')} \\({period}\\) "
+
+                        message += "\n"
+
+        message += "\n"
+
+        # Add volume analysis
+        message += "*Volume Analysis:*\n"
+        for tf_name, tf_display in timeframe_names.items():
+            if tf_name in all_data and not all_data[tf_name].empty:
+                df = all_data[tf_name]
+                if len(df) > 20 and 'volume' in df.columns:
+                    current_vol = df['volume'].iloc[-1]
+                    avg_vol = df['volume'].iloc[-20:].mean()
+
+                    if avg_vol > 0:
+                        vol_ratio = current_vol / avg_vol
+
+                        if vol_ratio > 1.5:
+                            vol_desc = "Very High"
+                            vol_emoji = "📈📈"
+                        elif vol_ratio > 1.2:
+                            vol_desc = "Above Average"
+                            vol_emoji = "📈"
+                        elif vol_ratio < 0.8:
+                            vol_desc = "Below Average"
+                            vol_emoji = "📉"
+                        elif vol_ratio < 0.5:
+                            vol_desc = "Very Low"
+                            vol_emoji = "📉📉"
+                        else:
+                            vol_desc = "Average"
+                            vol_emoji = "➖"
+
+                        message += f"*{self.escape_markdown(tf_display)}:* {vol_emoji} {self.escape_markdown(vol_desc)} \\({self.escape_markdown(f'{vol_ratio:.2f}x')} avg\\)\n"
+
+        message += "\n"
+
+        # Add key price levels (support/resistance)
+        message += "*Key Price Levels:*\n"
+
+        # Use the longest timeframe for identifying support/resistance levels
+        primary_tf = 'long_term'
+        if primary_tf in all_data and not all_data[primary_tf].empty:
+            df = all_data[primary_tf]
+
+            if len(df) >= 30:
+                # Simple support/resistance detection using recent peaks and troughs
+                # This is a simplified version - the real implementation would be more complex
+
+                # Get recent high/low
+                recent_high = df['high'].iloc[-20:].max()
+                recent_low = df['low'].iloc[-20:].min()
+
+                # Last close
+                last_close = df['close'].iloc[-1]
+
+                # Additional levels using SMA
+                sma_20 = df['close'].rolling(20).mean().iloc[-1] if len(df) >= 20 else None
+                sma_50 = df['close'].rolling(50).mean().iloc[-1] if len(df) >= 50 else None
+
+                message += f"Resistance: ${self.escape_markdown(f'{recent_high:.2f}')}\n"
+                message += f"Support: ${self.escape_markdown(f'{recent_low:.2f}')}\n"
+
+                if sma_20 is not None:
+                    message += f"SMA 20: ${self.escape_markdown(f'{sma_20:.2f}')}"
+                    # Show position relative to SMA
+                    if last_close > sma_20:
+                        message += " \\(Price Above ↗️\\)"
+                    else:
+                        message += " \\(Price Below ↘️\\)"
+                    message += "\n"
+
+                if sma_50 is not None:
+                    message += f"SMA 50: ${self.escape_markdown(f'{sma_50:.2f}')}"
+                    # Show position relative to SMA
+                    if last_close > sma_50:
+                        message += " \\(Price Above ↗️\\)"
+                    else:
+                        message += " \\(Price Below ↘️\\)"
+                    message += "\n"
+
+        message += "\n"
+
+        # Add detailed technical indicators
+        message += "*Technical Indicators:*\n"
 
         # Get technical indicators for each timeframe
         try:
             summary = self.stock_collector.get_summary(ticker)
             if 'timeframes' in summary:
-                message += "*Technical Indicators:*\n\n"
                 for timeframe, tf_data in summary['timeframes'].items():
-                    if 'indicators' in tf_data:
-                        display_name = timeframe_names.get(timeframe, timeframe)
+                    if timeframe in timeframe_names and 'indicators' in tf_data:
+                        tf_display = timeframe_names.get(timeframe)
                         indicators = tf_data['indicators']
-                        message += f"{self.escape_markdown(display_name)}:\n"
 
-                        # Handle RSI
-                        rsi = indicators.get('rsi')
-                        if rsi is not None and isinstance(rsi, (int, float)):
-                            rsi_str = self.escape_markdown(f'{rsi:.1f}')
-                            message += f"  RSI: {rsi_str}\n"
-                        else:
-                            message += f"  RSI: {self.escape_markdown(str(rsi))}\n"
+                        # Only show timeframes with actual indicators
+                        has_indicators = False
+                        for ind in ['rsi', 'macd', 'stoch_k', 'bb_pct']:
+                            if ind in indicators:
+                                has_indicators = True
+                                break
 
-                        # Handle MA Trend
-                        ma_trend = indicators.get('ma_trend', 'N/A')
-                        ma_str = ma_trend.upper() if isinstance(ma_trend, str) else str(ma_trend)
-                        message += f"  MA Trend: {self.escape_markdown(ma_str)}\n"
+                        if not has_indicators:
+                            continue
 
-                        # Handle Volume Ratio
-                        vol_ratio = indicators.get('volume_ratio')
-                        if vol_ratio is not None and isinstance(vol_ratio, (int, float)):
-                            vol_str = self.escape_markdown(f'{vol_ratio:.2f}x')
-                            message += f"  Volume Ratio: {vol_str}\n\n"
-                        else:
-                            message += f"  Volume Ratio: {self.escape_markdown(str(vol_ratio))}\n\n"
+                        message += f"*{self.escape_markdown(tf_display)}:*\n"
+
+                        # RSI with interpretation
+                        if 'rsi' in indicators:
+                            rsi = indicators['rsi']
+                            if isinstance(rsi, (int, float)):
+                                rsi_str = f"{rsi:.1f}"
+
+                                # Add interpretation
+                                if rsi > 70:
+                                    rsi_str += " (Overbought 🔴)"
+                                elif rsi < 30:
+                                    rsi_str += " (Oversold 🟢)"
+                                elif rsi > 60:
+                                    rsi_str += " (Bullish 🟢)"
+                                elif rsi < 40:
+                                    rsi_str += " (Bearish 🔴)"
+
+                                message += f"RSI: {self.escape_markdown(rsi_str)}\n"
+
+                        # MACD
+                        if all(k in indicators for k in ['macd', 'macd_signal', 'macd_hist']):
+                            macd = indicators['macd']
+                            signal = indicators['macd_signal']
+                            hist = indicators['macd_hist']
+
+                            if all(isinstance(x, (int, float)) for x in [macd, signal, hist]):
+                                # Determine if bullish or bearish
+                                if hist > 0 and hist > indicators.get('macd_hist_prev', 0):
+                                    macd_str = f"MACD: {hist:.3f} (Bullish Momentum 🟢)"
+                                elif hist < 0 and hist < indicators.get('macd_hist_prev', 0):
+                                    macd_str = f"MACD: {hist:.3f} (Bearish Momentum 🔴)"
+                                elif hist > 0:
+                                    macd_str = f"MACD: {hist:.3f} (Positive 🟢)"
+                                elif hist < 0:
+                                    macd_str = f"MACD: {hist:.3f} (Negative 🔴)"
+                                else:
+                                    macd_str = f"MACD: {hist:.3f} (Neutral ⚪)"
+
+                                message += f"{self.escape_markdown(macd_str)}\n"
+
+                        # Bollinger Bands position
+                        if 'bb_pct' in indicators:
+                            bb_pct = indicators['bb_pct']
+                            if isinstance(bb_pct, (int, float)):
+                                bb_str = f"{bb_pct:.2f}"
+
+                                # Add interpretation
+                                if bb_pct > 0.8:
+                                    bb_str += " (Near Upper Band 🔴)"
+                                elif bb_pct < 0.2:
+                                    bb_str += " (Near Lower Band 🟢)"
+                                else:
+                                    bb_str += " (Middle Range ⚪)"
+
+                                message += f"BBands: {self.escape_markdown(bb_str)}\n"
+
+                        # Stochastic oscillator
+                        if all(k in indicators for k in ['stoch_k', 'stoch_d']):
+                            k = indicators['stoch_k']
+                            d = indicators['stoch_d']
+
+                            if all(isinstance(x, (int, float)) for x in [k, d]):
+                                if k > 80 and d > 80:
+                                    stoch_str = f"Stoch: {k:.1f}/{d:.1f} (Overbought 🔴)"
+                                elif k < 20 and d < 20:
+                                    stoch_str = f"Stoch: {k:.1f}/{d:.1f} (Oversold 🟢)"
+                                elif k > d:
+                                    stoch_str = f"Stoch: {k:.1f}/{d:.1f} (Bullish Crossover 🟢)"
+                                elif k < d:
+                                    stoch_str = f"Stoch: {k:.1f}/{d:.1f} (Bearish Crossover 🔴)"
+                                else:
+                                    stoch_str = f"Stoch: {k:.1f}/{d:.1f} (Neutral ⚪)"
+
+                                message += f"{self.escape_markdown(stoch_str)}\n"
+
+                        message += "\n"
         except Exception as e:
             logger.error(f"Error getting technical indicators: {e}")
+            message += "Error retrieving technical indicators\n"
 
-        logger.info(message)
+        # Add market context
+        try:
+            # This would pull current market data from a market sentiment service
+            if hasattr(self, 'sentiment_tracker'):
+                market_sentiment = self.sentiment_tracker.get_current_sentiment()
+                if market_sentiment:
+                    message += "*Market Context:*\n"
+                    value = market_sentiment['value']
+                    message += f"Market Sentiment: {self.escape_markdown(market_sentiment['status'])} \\({self.escape_markdown(f'{value:.1f}/10')}\\)\n"
+        except Exception as e:
+            logger.error(f"Error getting market context: {e}")
+
+        # Add volume profile information if available
+        # (This would require additional implementation for volume profile analysis)
+
+        # Add disclaimer
+        message += "\n⚠️ *Disclaimer:* This is technical analysis based on historical data and indicators\\. Past performance is not indicative of future results\\."
+
         await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
 
 
@@ -401,7 +834,7 @@ class TelegramBot:
 
         await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
     async def check_pattern(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /pattern <ticker> command with multi-timeframe analysis."""
+        """Enhanced pattern analysis with multi-timeframe insights and actionable signals."""
         if not context.args:
             await update.message.reply_text("Please provide a ticker symbol: /pattern AAPL")
             return
@@ -410,111 +843,154 @@ class TelegramBot:
         # Get multi-timeframe data
         all_data = self.stock_collector.get_multi_timeframe_data(ticker)
 
-        if not all_data:
-            await update.message.reply_text(f"No data available for {ticker} Make sure it's in your watchlist")
+        if not all_data or all(data.empty for data in all_data.values()):
+            await update.message.reply_text(f"No data available for {ticker}. Make sure it's in your watchlist.")
             return
 
-        message = f"📊 *Multi Timeframe Pattern Analysis for {ticker}*\n\n"
-        combined_signals = {}
-        pattern_counts = {'long_term': 0, 'medium_term': 0, 'short_term': 0}
+        message = f"📊 *Advanced Pattern Analysis for {self.escape_markdown(ticker)}*\n\n"
 
-        timeframe_names = {
-            'long_term': '📅 Hourly',
-            'medium_term': '🕐 15 minute',
-            'short_term': '⏱️ 5 minute',
-            "very_short_term": '⏱️ 2 minute'
-        }
+        # Create a more sophisticated pattern analyzer using our enhanced class
+        from services.pattern_recognition import TalibPatternRecognition
+        enhanced_recognizer = TalibPatternRecognition()
 
-        # Analyze patterns for each timeframe
-        for timeframe, data in all_data.items():
-            if data.empty or timeframe == 'very_short_term':
-                continue
+        # Initialize the enhanced pattern recognition with our base recognizer
+        # This would be better if we had the enhanced class available directly
+        from pattern_recognition import TalibPatternRecognition as EnhancedPatternRecognizer
+        enhanced_analyzer = EnhancedPatternRecognizer(enhanced_recognizer)
 
-            patterns = self.pattern_recognizer.detect_patterns(data,lookback_periods=10)
+        # Use the advanced analyzer to get comprehensive insights
+        analysis_results = enhanced_analyzer.analyze_patterns(ticker, all_data)
 
-            if patterns:
-                current_price = data['close'].iloc[-1]
-                indicators = self.stock_collector.calculate_technical_indicators(data)
-                pattern_counts[timeframe] = len(patterns)
-
-                # Process patterns for combined analysis
-                for pattern_name, occurrences in patterns.items():
-                    if occurrences:
-                        latest_occurrence = max(occurrences, key=lambda x: x['timestamp'])
-                        signal = self.pattern_recognizer.get_trading_signal(
-                            pattern_name,
-                            latest_occurrence['signal'],
-                            current_price,
-                            atr=indicators.get('atr'),
-                            volume_ratio=indicators.get('volume_ratio', 1.0),
-                            additional_indicators=indicators
-                        )
-
-                        # Store for combined analysis
-                        if timeframe not in combined_signals:
-                            combined_signals[timeframe] = []
-                        combined_signals[timeframe].append({
-                            'pattern': pattern_name,
-                            'signal': signal
-                        })
-
-        # Create a summary section for patterns found
-        if any(pattern_counts.values()):
-            message += "📈 *Patterns Detected:*\n"
-            for timeframe, count in pattern_counts.items():
-                if count > 0:
-                    display_name = timeframe_names.get(timeframe, timeframe)
-                    message += f"{display_name}: {count} patterns\n"
-            message += "\n"
-
-        # Combine signals from all timeframes
-        if combined_signals:
-            combined_action, combined_confidence = self._combine_timeframe_signals(combined_signals)
-
-            message += "📊 *Combined Signal:*\n"
-            message += f"Action: {combined_action}\n"
-            message += f"Confidence: {self.escape_markdown(combined_confidence.upper())}\n\n"
-
-            # Less strict conditions for showing strong signal
-            if combined_action in ['BUY', 'SELL']:
-                message += "✅ *Trading Signal Detected*\n"
-
-                # Show the patterns found across timeframes
-                for timeframe, signals in combined_signals.items():
-                    if signals:
-                        display_name = timeframe_names.get(timeframe, timeframe)
-                        for signal_data in signals[:1]:  # Show just the first pattern for each timeframe
-                            pattern = signal_data.get('pattern', 'Unknown pattern')
-                            action = signal_data.get('signal', {}).get('action', 'UNKNOWN')
-                            message += f"{display_name}: {pattern} ({action})\n"
-            else:
-                message += "⚠️ No clear directional signal at this time\n"
-        else:
-            message += "No significant patterns detected in any timeframe\n"
-
-        # Add current price
+        # Add current price information
         try:
             latest_prices = self.stock_collector.get_latest_prices()
-            if ticker in latest_prices and 'very_short_term' in latest_prices[ticker]:
-                current_price = latest_prices[ticker]['very_short_term']['price']
-                # Escape special characters for MarkdownV2
-                message += f"\n💰 Current Price: ${self.escape_markdown(f'{current_price:.2f}')}"
+            if ticker in latest_prices and 'short_term' in latest_prices[ticker]:
+                current_price = latest_prices[ticker]['short_term']['price']
+                message += f"💰 *Current Price:* ${self.escape_markdown(f'{current_price:.2f}')}\n\n"
         except Exception as e:
             logger.error(f"Error getting current price: {e}")
+
+        # Add trading signals section
+        trading_signals = analysis_results.get("trading_signals", {})
+        signal = trading_signals.get("signal", "NEUTRAL")
+        confidence = trading_signals.get("confidence", "medium")
+
+        message += "🎯 *Trading Signal:*\n"
+        message += f"Action: *{self.escape_markdown(signal)}*\n"
+        message += f"Confidence: *{self.escape_markdown(confidence.upper())}*\n\n"
+
+        # Add multi-timeframe confirmation details
+        confirmation = analysis_results.get("multi_timeframe_confirmation", {})
+        primary_bias = confirmation.get("primary_bias", "neutral")
+        alignment_score = confirmation.get("alignment_score", 0)
+        aligned_timeframes = confirmation.get("aligned_timeframes", [])
+
+        message += "⏱️ *Multi\\-Timeframe Confirmation:*\n"
+        message += f"Bias: *{self.escape_markdown(primary_bias.upper())}*\n"
+        message += f"Alignment Score: *{self.escape_markdown(f'{alignment_score:.1f}%')}*\n"
+
+        if aligned_timeframes:
+            message += f"Aligned Timeframes: *{self.escape_markdown(', '.join(aligned_timeframes))}*\n\n"
+        else:
+            message += "Aligned Timeframes: *None*\n\n"
+
+        # Add pattern clusters information
+        clusters = analysis_results.get("pattern_clusters", {})
+        cluster_bias = clusters.get("bias", "neutral")
+
+        message += "🔍 *Pattern Clusters:*\n"
+        message += f"Bias: *{self.escape_markdown(cluster_bias.upper())}*\n"
+
+        # Add bullish clusters
+        bullish_clusters = clusters.get("bullish", [])
+        if bullish_clusters:
+            message += "Bullish Patterns:\n"
+            for cluster in bullish_clusters[:2]:  # Show top 2 clusters
+                cluster_type = cluster.get("cluster_type", "unknown")
+                patterns = [p["pattern"] for p in cluster.get("patterns", [])]
+                if patterns:
+                    message += f"\\- {self.escape_markdown(cluster_type)}: {self.escape_markdown(', '.join(patterns[:3]))}\n"
+
+        # Add bearish clusters
+        bearish_clusters = clusters.get("bearish", [])
+        if bearish_clusters:
+            message += "Bearish Patterns:\n"
+            for cluster in bearish_clusters[:2]:  # Show top 2 clusters
+                cluster_type = cluster.get("cluster_type", "unknown")
+                patterns = [p["pattern"] for p in cluster.get("patterns", [])]
+                if patterns:
+                    message += f"\\- {self.escape_markdown(cluster_type)}: {self.escape_markdown(', '.join(patterns[:3]))}\n"
+
+        message += "\n"
+
+        # Add key insights from the analysis
+        insights = analysis_results.get("insights", {})
+
+        message += "💡 *Key Insights:*\n"
+
+        summary = insights.get("summary", "")
+        if summary:
+            message += f"{self.escape_markdown(summary)}\n\n"
+
+        key_points = insights.get("key_points", [])
+        if key_points:
+            message += "*Key Points:*\n"
+            for point in key_points[:3]:  # Top 3 key points
+                message += f"\\- {self.escape_markdown(point)}\n"
+            message += "\n"
+
+        # Add action items for the trader
+        action_items = insights.get("action_items", [])
+        if action_items:
+            message += "*Recommended Actions:*\n"
+            for item in action_items:
+                message += f"\\- {self.escape_markdown(item)}\n"
+            message += "\n"
+
+        # Add risk factors to be aware of
+        risk_factors = insights.get("risk_factors", [])
+        if risk_factors:
+            message += "*Risk Factors:*\n"
+            for risk in risk_factors:
+                message += f"\\- {self.escape_markdown(risk)}\n"
+            message += "\n"
+
+        # Add entry and exit strategy if signal is not neutral
+        if signal != "NEUTRAL":
+            entry_strategy = insights.get("entry_strategy", {})
+            exit_strategy = insights.get("exit_strategy", {})
+            position_sizing = insights.get("position_sizing", {})
+
+            message += "*Trading Strategy:*\n"
+
+            if entry_strategy:
+                message += f"Entry: {self.escape_markdown(entry_strategy.get('strategy', 'N/A'))}\n"
+
+            if exit_strategy:
+                message += f"Exit: {self.escape_markdown(exit_strategy.get('take_profit', 'N/A'))}\n"
+                message += f"Stop Loss: {self.escape_markdown(exit_strategy.get('stop_loss', 'N/A'))}\n"
+
+            if position_sizing:
+                message += f"Position Size: {self.escape_markdown(position_sizing.get('recommendation', 'N/A'))}\n"
+
+        # Add disclaimer
+        message += "\n⚠️ *Disclaimer:* This is algorithmic analysis based on candlestick patterns and technical indicators\\. Always conduct your own research and consider your risk tolerance before trading\\."
 
         await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
 
     # Add this helper function to escape Markdown characters
     def escape_markdown(self, text):
         """
-        Helper function to escape MarkdownV2 special characters.
-        Must escape: _ * [ ] ( ) ~ ` > # + - = | { } . !
+        Escapes MarkdownV2 special characters as per Telegram's official documentation.
+        The characters to escape are: _ * [ ] ( ) ~ ` > # + - = | { } . !
         """
         if not isinstance(text, str):
             text = str(text)
 
-        escape_chars = r'_*[]()~`>#+-=|{}.!'
+        # Use a set for faster lookup
+        escape_chars = {'_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!'}
         return ''.join(f'\\{c}' if c in escape_chars else c for c in text)
+
     def _combine_timeframe_signals(self, signals):
         """Combine signals from all timeframes to generate a comprehensive trading decision."""
         combined_strength = 0
@@ -741,245 +1217,636 @@ class TelegramBot:
         message = self._format_ticker_sentiment_meter(ticker, sentiment_data)
 
         await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
-
     async def analyze(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle /analyze <ticker> command - combining technical and sentiment analysis."""
+        """Enhanced comprehensive analysis combining technical, pattern, and sentiment data."""
         if not context.args:
             await update.message.reply_text("Please provide a ticker symbol: /analyze AAPL")
             return
 
         ticker = context.args[0].upper()
 
-        message = f"🔍 *Comprehensive Analysis for {ticker}* 🔍\n\n"
+        # First check if the ticker is valid
+        validity_check = self.stock_collector.check_ticker_validity(ticker)
+        if not validity_check.get('valid', False):
+            await update.message.reply_text(f"Invalid ticker symbol: {ticker}. {validity_check.get('reason', '')}")
+            return
 
-        # 1. Get sentiment data
-        if not hasattr(self, 'sentiment_tracker'):
-            try:
-                from services.sentiment_tracker import SentimentTracker
-                self.sentiment_tracker = SentimentTracker(self.db_manager)
-            except Exception as e:
-                logger.error(f"Error initializing sentiment tracker: {e}")
+        # Begin building comprehensive analysis message
+        message = f"🔬 *COMPREHENSIVE ANALYSIS: {self.escape_markdown(ticker)}* 🔬\n\n"
 
-        if hasattr(self, 'sentiment_tracker'):
-            try:
-                ticker_sentiment = self.sentiment_tracker.get_ticker_sentiment(ticker)
-                market_sentiment = self.sentiment_tracker.get_current_sentiment()
+        # Get company info
+        company_info = self.stock_collector.get_company_info(ticker)
 
-                message += "📊 *Sentiment Analysis*\n"
-                message += f"• {ticker} Sentiment: {ticker_sentiment['status']} ({ticker_sentiment['value']:.1f}/10)\n"
-                message += f"• Market Sentiment: {market_sentiment['status']} ({market_sentiment['value']:.1f}/10)\n"
+        # SECTION 1: COMPANY OVERVIEW
+        if company_info and not company_info.get('error'):
+            message += "*COMPANY OVERVIEW*\n"
+            message += f"Name: *{self.escape_markdown(company_info.get('name', ticker))}*\n"
+            message += f"Sector: {self.escape_markdown(company_info.get('sector', 'N/A'))}\n"
+            message += f"Industry: {self.escape_markdown(company_info.get('industry', 'N/A'))}\n"
 
-                # Add articles count
-                if ticker_sentiment['article_count'] > 0:
-                    message += f"• Based on {ticker_sentiment['article_count']} articles about {ticker} today\n"
+            # Add key metrics if available
+            if 'market_cap' in company_info:
+                market_cap = company_info['market_cap']
+                if isinstance(market_cap, (int, float)) and market_cap > 0:
+                    # Format market cap in billions/millions
+                    if market_cap >= 1_000_000_000:
+                        formatted_mcap = f"${market_cap/1_000_000_000:.2f}B"
+                    else:
+                        formatted_mcap = f"${market_cap/1_000_000:.2f}M"
+                    message += f"Market Cap: {self.escape_markdown(formatted_mcap)}\n"
 
+            if 'pe_ratio' in company_info and company_info['pe_ratio'] != 'N/A':
+                message += f"P/E Ratio: {self.escape_markdown(str(company_info['pe_ratio']))}\n"
+
+            if 'beta' in company_info and company_info['beta'] != 'N/A':
+                message += f"Beta: {self.escape_markdown(str(company_info['beta']))}\n"
+
+            message += "\n"
+
+        # SECTION 2: CURRENT PRICE DATA
+        message += "*CURRENT PRICE*\n"
+
+        # Get multi-timeframe prices
+        latest_prices = self.stock_collector.get_latest_prices()
+        current_price = None
+        daily_change = None
+
+        if ticker in latest_prices:
+            ticker_data = latest_prices[ticker]
+
+            # Get the most recent price across timeframes
+            if 'short_term' in ticker_data:
+                current_price = ticker_data['short_term'].get('price')
+
+                # Try to calculate daily change if we have open price
+                open_price = ticker_data['short_term'].get('open')
+                if current_price is not None and open_price is not None and open_price > 0:
+                    daily_change = ((current_price / open_price) - 1) * 100
+
+            # If we couldn't get price from short-term, try other timeframes
+            if current_price is None:
+                for tf in ['medium_term', 'long_term', 'very_short_term']:
+                    if tf in ticker_data and ticker_data[tf].get('price') is not None:
+                        current_price = ticker_data[tf].get('price')
+                        break
+
+        if current_price is not None:
+            message += f"Price: *${self.escape_markdown(f'{current_price:.2f}')}*"
+
+            # Add daily change if available
+            if daily_change is not None:
+                change_emoji = "🔼" if daily_change > 0 else "🔽" if daily_change < 0 else "➖"
+                message += f" {change_emoji} {self.escape_markdown(f'{daily_change:.2f}%')}\n"
+            else:
                 message += "\n"
-            except Exception as e:
-                logger.error(f"Error getting sentiment data: {e}")
-                message += "📊 *Sentiment Analysis*\n• Error retrieving sentiment data\n\n"
 
-        # 2. Get technical analysis
-        try:
-            # Get multi-timeframe data
-            all_data = self.stock_collector.get_multi_timeframe_data(ticker)
+            # Add 52-week range if available
+            if company_info and not company_info.get('error'):
+                high_52w = company_info.get('fifty_two_week_high')
+                low_52w = company_info.get('fifty_two_week_low')
 
-            message += "📈 *Technical Analysis*\n"
+                if high_52w not in (None, 'N/A') and low_52w not in (None, 'N/A'):
+                    message += f"52\\-Week Range: ${self.escape_markdown(f'{low_52w:.2f}')} \\- ${self.escape_markdown(f'{high_52w:.2f}')}\n"
 
-            # Get latest price
-            latest_prices = self.stock_collector.get_latest_prices()
-            current_price = None
-            if ticker in latest_prices and 'short_term' in latest_prices[ticker]:
-                current_price = latest_prices[ticker]['short_term']['price']
-                message += f"• Current Price: ${current_price:.2f}\n"
+                    # Calculate where current price is in the 52-week range (0-100%)
+                    if high_52w > low_52w and current_price is not None:
+                        pct_of_range = (current_price - low_52w) / (high_52w - low_52w) * 100
+                        message += f"Current price is at {self.escape_markdown(f'{pct_of_range:.1f}%')} of 52\\-week range\n"
+        else:
+            message += "Price data not available\n"
 
-            # Calculate indicators for each timeframe
-            overall_bullish = 0
-            overall_bearish = 0
-            timeframe_names = {
-                'long_term': '📅 Hourly',
-                'medium_term': '🕐 15 minute',
-                'short_term': '⏱️ 5 minute',
-                'very_short_term': '⏱️ 2 minute'
+        message += "\n"
+
+        # SECTION 3: TECHNICAL ANALYSIS
+        message += "*TECHNICAL ANALYSIS*\n"
+
+        # Get multi-timeframe data for technical analysis
+        all_data = self.stock_collector.get_multi_timeframe_data(ticker)
+
+        # Define user-friendly timeframe labels
+        timeframe_labels = {
+            'very_short_term': '2min',
+            'short_term': '5min',
+            'medium_term': '15min',
+            'long_term': '1hour'
+        }
+
+        # Calculate indicators for multiple timeframes
+        tech_signals = {}
+
+        for timeframe, data in all_data.items():
+            if data.empty:
+                continue
+
+            # Calculate key indicators
+            indicators = self.stock_collector.calculate_technical_indicators(data)
+            if not indicators:
+                continue
+
+            tf_label = timeframe_labels.get(timeframe, timeframe)
+            tech_signals[tf_label] = {
+                'bullish': 0,
+                'bearish': 0,
+                'neutral': 0,
+                'indicators': {}
             }
 
-            for timeframe, data in all_data.items():
-                if data.empty or timeframe == 'very_short_term':
-                    continue
+            # Analyze RSI
+            if 'rsi' in indicators:
+                rsi = indicators['rsi']
+                if isinstance(rsi, (int, float)):
+                    tech_signals[tf_label]['indicators']['rsi'] = rsi
+                    if rsi < 30:
+                        tech_signals[tf_label]['bullish'] += 1
+                        tech_signals[tf_label]['indicators']['rsi_signal'] = 'bullish'
+                    elif rsi > 70:
+                        tech_signals[tf_label]['bearish'] += 1
+                        tech_signals[tf_label]['indicators']['rsi_signal'] = 'bearish'
+                    else:
+                        tech_signals[tf_label]['neutral'] += 1
+                        tech_signals[tf_label]['indicators']['rsi_signal'] = 'neutral'
 
-                # Calculate indicators
-                indicators = self.stock_collector.calculate_technical_indicators(data)
+            # Analyze MACD
+            if all(k in indicators for k in ['macd', 'macd_signal', 'macd_hist']):
+                hist = indicators['macd_hist']
+                if isinstance(hist, (int, float)):
+                    tech_signals[tf_label]['indicators']['macd_hist'] = hist
+                    if hist > 0:
+                        tech_signals[tf_label]['bullish'] += 1
+                        tech_signals[tf_label]['indicators']['macd_signal'] = 'bullish'
+                    else:
+                        tech_signals[tf_label]['bearish'] += 1
+                        tech_signals[tf_label]['indicators']['macd_signal'] = 'bearish'
 
-                # Detect patterns
-                patterns = self.pattern_recognizer.detect_patterns(data, lookback_periods=5)
+            # Analyze Moving Averages
+            if 'ma_trend' in indicators:
+                ma_trend = indicators['ma_trend']
+                tech_signals[tf_label]['indicators']['ma_trend'] = ma_trend
+                if ma_trend == 'bullish':
+                    tech_signals[tf_label]['bullish'] += 1
+                elif ma_trend == 'bearish':
+                    tech_signals[tf_label]['bearish'] += 1
+                else:
+                    tech_signals[tf_label]['neutral'] += 1
 
-                # Determine signal for this timeframe
-                bullish_signals = 0
-                bearish_signals = 0
+        # Calculate overall technical bias
+        overall_bullish = sum(tf['bullish'] for tf in tech_signals.values())
+        overall_bearish = sum(tf['bearish'] for tf in tech_signals.values())
+        overall_neutral = sum(tf['neutral'] for tf in tech_signals.values())
 
-                # Process indicators
+        # Determine technical trend
+        tech_trend = "NEUTRAL"
+        if overall_bullish > overall_bearish * 1.5:
+            tech_trend = "BULLISH"
+        elif overall_bearish > overall_bullish * 1.5:
+            tech_trend = "BEARISH"
+        elif overall_bullish > overall_bearish:
+            tech_trend = "MODERATELY BULLISH"
+        elif overall_bearish > overall_bullish:
+            tech_trend = "MODERATELY BEARISH"
+
+        # Display technical analysis summary
+        message += f"Overall Trend: *{self.escape_markdown(tech_trend)}*\n"
+        message += f"Bullish Signals: {self.escape_markdown(str(overall_bullish))}\n"
+        message += f"Bearish Signals: {self.escape_markdown(str(overall_bearish))}\n\n"
+
+        # Display key technical indicators by timeframe
+        message += "Key Indicators:\n"
+        for tf_label, signals in tech_signals.items():
+            indicators = signals['indicators']
+            if indicators:
+                # Only show timeframes with actual indicators
+                message += f"• {self.escape_markdown(tf_label)}: "
+
+                # Show bias first
+                if signals['bullish'] > signals['bearish']:
+                    message += "Bullish 📈 "
+                elif signals['bearish'] > signals['bullish']:
+                    message += "Bearish 📉 "
+                else:
+                    message += "Neutral ↔️ "
+
+                # Add RSI if available
                 if 'rsi' in indicators:
                     rsi = indicators['rsi']
-                    if isinstance(rsi, (int, float)):
-                        if rsi < 30:
-                            bullish_signals += 1  # Oversold
-                        elif rsi > 70:
-                            bearish_signals += 1  # Overbought
+                    rsi_signal = indicators.get('rsi_signal', 'neutral')
 
+                    # Format RSI with signal
+                    if rsi_signal == 'bullish':
+                        message += f"RSI: {self.escape_markdown(f'{rsi:.1f}')} ✅ "
+                    elif rsi_signal == 'bearish':
+                        message += f"RSI: {self.escape_markdown(f'{rsi:.1f}')} ❌ "
+                    else:
+                        message += f"RSI: {self.escape_markdown(f'{rsi:.1f}')} ↔️ "
+
+                # Add MA trend if available
                 if 'ma_trend' in indicators:
                     ma_trend = indicators['ma_trend']
                     if ma_trend == 'bullish':
-                        bullish_signals += 1
+                        message += "MA: Above ✅ "
                     elif ma_trend == 'bearish':
-                        bearish_signals += 1
+                        message += "MA: Below ❌ "
 
-                # Process patterns
-                pattern_count = sum(len(occurrences) for occurrences in patterns.values())
+                message += "\n"
 
-                # Add to overall count
-                overall_bullish += bullish_signals
-                overall_bearish += bearish_signals
+        message += "\n"
 
-                # Only add timeframe details if significant signals exist
-                if bullish_signals > 0 or bearish_signals > 0 or pattern_count > 0:
-                    tf_display = timeframe_names.get(timeframe, timeframe)
+        # SECTION 4: PATTERN ANALYSIS
+        message += "*PATTERN ANALYSIS*\n"
 
-                    # Get the direction for this timeframe
-                    if bullish_signals > bearish_signals:
-                        tf_direction = "🟢 Bullish"
-                    elif bearish_signals > bullish_signals:
-                        tf_direction = "🔴 Bearish"
-                    else:
-                        tf_direction = "⚪ Neutral"
+        # Detect patterns across timeframes
+        patterns_by_timeframe = {}
+        combined_patterns = {}
 
-                    message += f"• {tf_display}: {tf_direction}"
+        for timeframe, data in all_data.items():
+            if data.empty:
+                continue
 
-                    # Add pattern info if available
-                    if pattern_count > 0:
-                        message += f" ({pattern_count} patterns detected)"
+            tf_label = timeframe_labels.get(timeframe, timeframe)
+            patterns = self.pattern_recognizer.detect_patterns(data, lookback_periods=5)
+
+            if patterns:
+                patterns_by_timeframe[tf_label] = []
+
+                for pattern_name, occurrences in patterns.items():
+                    if occurrences:
+                        # Get the most recent occurrence
+                        latest_occurrence = max(occurrences, key=lambda x: x['timestamp'])
+                        signal_value = latest_occurrence['signal']
+                        signal_type = "bullish" if signal_value > 0 else "bearish" if signal_value < 0 else "neutral"
+
+                        # Add to timeframe patterns
+                        patterns_by_timeframe[tf_label].append({
+                            'pattern': pattern_name,
+                            'signal': signal_type
+                        })
+
+                        # Add to combined patterns for overall bias
+                        if pattern_name not in combined_patterns:
+                            combined_patterns[pattern_name] = {'bullish': 0, 'bearish': 0, 'neutral': 0}
+
+                        combined_patterns[pattern_name][signal_type] += 1
+
+        # Calculate pattern bias
+        pattern_bullish = sum(p['bullish'] for p in combined_patterns.values())
+        pattern_bearish = sum(p['bearish'] for p in combined_patterns.values())
+
+        # Determine pattern trend
+        pattern_trend = "NEUTRAL"
+        if pattern_bullish > pattern_bearish * 1.5:
+            pattern_trend = "BULLISH"
+        elif pattern_bearish > pattern_bullish * 1.5:
+            pattern_trend = "BEARISH"
+        elif pattern_bullish > pattern_bearish:
+            pattern_trend = "MODERATELY BULLISH"
+        elif pattern_bearish > pattern_bullish:
+            pattern_trend = "MODERATELY BEARISH"
+
+        # Display pattern analysis summary
+        message += f"Pattern Bias: *{self.escape_markdown(pattern_trend)}*\n"
+
+        # Show patterns by timeframe
+        if patterns_by_timeframe:
+            message += "Detected Patterns:\n"
+            for tf_label, patterns in patterns_by_timeframe.items():
+                if patterns:
+                    message += f"• {self.escape_markdown(tf_label)}: "
+
+                    # Count bullish vs bearish patterns
+                    tf_bullish = sum(1 for p in patterns if p['signal'] == 'bullish')
+                    tf_bearish = sum(1 for p in patterns if p['signal'] == 'bearish')
+
+                    # Show counts and top patterns
+                    if tf_bullish > tf_bearish:
+                        message += f"{tf_bullish} bullish, {tf_bearish} bearish \\- "
+                    elif tf_bearish > tf_bullish:
+                        message += f"{tf_bullish} bullish, {tf_bearish} bearish \\- "
+
+                    # Show up to 2 patterns
+                    pattern_texts = []
+                    for pattern in patterns[:2]:
+                        pattern_text = pattern['pattern']
+                        signal = pattern['signal']
+
+                        # Add emoji based on signal
+                        if signal == 'bullish':
+                            pattern_text += " 📈"
+                        elif signal == 'bearish':
+                            pattern_text += " 📉"
+
+                        pattern_texts.append(pattern_text)
+
+                    message += self.escape_markdown(", ".join(pattern_texts))
+
+                    if len(patterns) > 2:
+                        message += self.escape_markdown(f" (+{len(patterns)-2} more)")
 
                     message += "\n"
+        else:
+            message += "No significant patterns detected\n"
+
+        message += "\n"
+
+        # SECTION 5: SENTIMENT ANALYSIS
+        message += "*SENTIMENT ANALYSIS*\n"
+
+        # Check if sentiment tracker is available
+        sentiment_data = None
+        if hasattr(self, 'sentiment_tracker'):
+            try:
+                sentiment_data = self.sentiment_tracker.get_ticker_sentiment(ticker)
+            except Exception as e:
+                logger.error(f"Error getting sentiment data: {e}")
+
+        if sentiment_data:
+            value = sentiment_data['value']
+            status = sentiment_data['status']
+            article_count = sentiment_data['article_count']
+
+            # Display sentiment summary
+            message += f"Sentiment: *{self.escape_markdown(status)}*\n"
+            message += f"Rating: {self.escape_markdown(f'{value:.1f}/10')}\n"
+            message += f"Based on {self.escape_markdown(str(article_count))} recent articles\n\n"
+
+            # Add sentiment meter
+            meter_length = 10
+            filled_segments = min(int(value * meter_length / 10), meter_length)
+
+            # Define meter character based on sentiment
+            if value >= 6.5:  # Positive
+                meter_char = "🟢"
+            elif value >= 5.5:  # Slightly positive
+                meter_char = "🟡"
+            elif value >= 4.5:  # Neutral
+                meter_char = "⚪"
+            elif value >= 3.5:  # Slightly negative
+                meter_char = "🟠"
+            else:  # Negative
+                meter_char = "🔴"
+
+            meter = meter_char * filled_segments + "⚫" * (meter_length - filled_segments)
+            message += f"{meter}\n\n"
+
+            # Try to get recent news headlines
+            recent_articles = None
+
+            if recent_articles:
+                message += "Recent Headlines:\n"
+                for article in recent_articles:
+                    headline = self._escape_markdown(article.title[:50] + "..." if len(article.title) > 50 else article.title)
+                    article_sentiment = self._sentiment_to_emoji(article.sentiment_rating)
+                    message += f"{article_sentiment} {headline}\n"
+        else:
+            message += "Sentiment data not available\n"
+
+        message += "\n"
+
+        # SECTION 6: TRADING SIGNAL
+        message += "*TRADING SIGNAL*\n"
+
+        # Combine technical, pattern, and sentiment analysis
+        signal = "NEUTRAL"
+        confidence = "LOW"
+
+        # Get individual signals
+        tech_signal = tech_trend
+        pattern_signal = pattern_trend
+
+        # Define sentiment signal
+        sentiment_signal = "NEUTRAL"
+        if sentiment_data:
+            value = sentiment_data['value']
+            if value >= 7.0:
+                sentiment_signal = "BULLISH"
+            elif value >= 6.0:
+                sentiment_signal = "MODERATELY BULLISH"
+            elif value <= 3.0:
+                sentiment_signal = "BEARISH"
+            elif value <= 4.0:
+                sentiment_signal = "MODERATELY BEARISH"
+
+        # Count aligned signals
+        bullish_signals = 0
+        bearish_signals = 0
+
+        # Technical signal
+        if "BULLISH" in tech_signal:
+            bullish_signals += 1
+        elif "BEARISH" in tech_signal:
+            bearish_signals += 1
+
+        # Pattern signal
+        if "BULLISH" in pattern_signal:
+            bullish_signals += 1
+        elif "BEARISH" in pattern_signal:
+            bearish_signals += 1
+
+        # Sentiment signal
+        if "BULLISH" in sentiment_signal:
+            bullish_signals += 1
+        elif "BEARISH" in sentiment_signal:
+            bearish_signals += 1
+
+        # Determine aligned signal
+        if bullish_signals >= 2 and bearish_signals == 0:
+            signal = "BUY"
+            confidence = "HIGH"
+        elif bullish_signals >= 2:
+            signal = "BUY"
+            confidence = "MEDIUM"
+        elif bearish_signals >= 2 and bullish_signals == 0:
+            signal = "SELL"
+            confidence = "HIGH"
+        elif bearish_signals >= 2:
+            signal = "SELL"
+            confidence = "MEDIUM"
+        elif bullish_signals > bearish_signals:
+            signal = "WATCH (Bullish Bias)"
+            confidence = "LOW"
+        elif bearish_signals > bullish_signals:
+            signal = "WATCH (Bearish Bias)"
+            confidence = "LOW"
+        else:
+            signal = "NEUTRAL"
+            confidence = "LOW"
+
+        # Display signal
+        message += f"Signal: *{self.escape_markdown(signal)}*\n"
+        message += f"Confidence: *{self.escape_markdown(confidence)}*\n\n"
+
+        # Show reasoning for the signal
+        message += "Signal Basis:\n"
+        message += f"• Technical Analysis: {self.escape_markdown(tech_signal)}\n"
+        message += f"• Pattern Analysis: {self.escape_markdown(pattern_signal)}\n"
+        message += f"• Sentiment Analysis: {self.escape_markdown(sentiment_signal)}\n\n"
+
+        # SECTION 7: TRADE SETUP (if signal is BUY or SELL)
+        if signal in ["BUY", "SELL"]:
+            message += "*TRADE SETUP*\n"
+
+            # Calculate suggested entry, target, and stop levels
+            if current_price is not None:
+                # Get ATR if available for stop calculation
+                atr = None
+                for tf_name in ['medium_term', 'short_term']:
+                    if tf_name in all_data and not all_data[tf_name].empty:
+                        indicators = self.stock_collector.calculate_technical_indicators(all_data[tf_name])
+                        if 'atr' in indicators:
+                            atr = indicators['atr']
+                            break
+
+                # If no ATR, use a percentage-based approach
+                if signal == "BUY":
+                    entry = current_price
+
+                    # Calculate stop and target based on ATR or percentage
+                    if atr is not None:
+                        stop = entry - (atr * 2)
+                        target1 = entry + (atr * 2)
+                        target2 = entry + (atr * 4)
+                    else:
+                        stop = entry * 0.97  # 3% stop
+                        target1 = entry * 1.03  # 3% first target
+                        target2 = entry * 1.06  # 6% second target
+
+                    # Format message
+                    message += f"Entry: ${self.escape_markdown(f'{entry:.2f}')}\n"
+                    message += f"Stop Loss: ${self.escape_markdown(f'{stop:.2f}')} \\({self.escape_markdown(f'{((stop/entry)-1)*100:.1f}%')}\\)\n"
+                    message += f"Target 1: ${self.escape_markdown(f'{target1:.2f}')} \\({self.escape_markdown(f'{((target1/entry)-1)*100:.1f}%')}\\)\n"
+                    message += f"Target 2: ${self.escape_markdown(f'{target2:.2f}')} \\({self.escape_markdown(f'{((target2/entry)-1)*100:.1f}%')}\\)\n"
+
+                    # Calculate risk-reward ratio
+                    rr1 = abs((target1 - entry) / (entry - stop))
+                    message += f"Risk/Reward Ratio: 1:{self.escape_markdown(f'{rr1:.1f}')}\n"
+
+                elif signal == "SELL":
+                    entry = current_price
+
+                    # Calculate stop and target based on ATR or percentage
+                    if atr is not None:
+                        stop = entry + (atr * 2)
+                        target1 = entry - (atr * 2)
+                        target2 = entry - (atr * 4)
+                    else:
+                        stop = entry * 1.03  # 3% stop for short
+                        target1 = entry * 0.97  # 3% first target
+                        target2 = entry * 0.94  # 6% second target
+
+                    # Format message
+                    message += f"Entry: ${self.escape_markdown(f'{entry:.2f}')}\n"
+                    message += f"Stop Loss: ${self.escape_markdown(f'{stop:.2f}')} \\({self.escape_markdown(f'{((stop/entry)-1)*100:.1f}%')}\\)\n"
+                    message += f"Target 1: ${self.escape_markdown(f'{target1:.2f}')} \\({self.escape_markdown(f'{((target1/entry)-1)*100:.1f}%')}\\)\n"
+                    message += f"Target 2: ${self.escape_markdown(f'{target2:.2f}')} \\({self.escape_markdown(f'{((target2/entry)-1)*100:.1f}%')}\\)\n"
+
+                    # Calculate risk-reward ratio
+                    rr1 = abs((entry - target1) / (stop - entry))
+                    message += f"Risk/Reward Ratio: 1:{self.escape_markdown(f'{rr1:.1f}')}\n"
+
+                # Position sizing suggestion
+                message += "\nSuggested Position Sizing:\n"
+
+                if confidence == "HIGH":
+                    message += "• Full position size \\(confidence is high\\)\n"
+                elif confidence == "MEDIUM":
+                    message += "• 1/2 to 2/3 position size \\(moderate confidence\\)\n"
+                else:
+                    message += "• 1/4 to 1/3 position size \\(speculative trade\\)\n"
+
+                # Add scaling suggestion
+                message += "• Consider scaling in/out at key levels\n"
 
             message += "\n"
-        except Exception as e:
-            logger.error(f"Error in technical analysis: {e}")
-            message += "📈 *Technical Analysis*\n• Error retrieving technical data\n\n"
 
-        # 3. Generate combined trading signal
-        try:
-            message += "🎯 *Combined Trading Signal*\n"
+        # SECTION 8: KEY EVENTS
+        message += "*KEY EVENTS & CATALYSTS*\n"
 
-            # Default neutral if no data
-            signal = "NEUTRAL"
-            confidence = "low"
+        # Get earnings dates
+        earnings_dates = self.stock_collector.get_earnings_dates(ticker)
+        if earnings_dates and len(earnings_dates) > 0:
+            next_earnings = earnings_dates[0]
+            message += f"Next Earnings: {self.escape_markdown(next_earnings['date'])}\n"
 
-            # If we have both sentiment and technical data
-            have_sentiment = hasattr(self, 'sentiment_tracker')
-            have_technical = overall_bullish > 0 or overall_bearish > 0
+            if 'estimate' in next_earnings and next_earnings['estimate'] != 'N/A':
+                message += f"EPS Estimate: {self.escape_markdown(str(next_earnings['estimate']))}\n"
+        else:
+            message += "No upcoming earnings dates found\n"
 
-            if have_sentiment and have_technical:
-                # Get sentiment values
-                ticker_sentiment_value = ticker_sentiment['value']
-                market_sentiment_value = market_sentiment['value']
+        message += "\n"
 
-                # Calculate weighted sentiment (70% ticker, 30% market)
-                weighted_sentiment = 0.7 * ticker_sentiment_value + 0.3 * market_sentiment_value
+        # SECTION 9: MARKET CONTEXT
+        message += "*MARKET CONTEXT*\n"
 
-                # Determine if sentiment is bullish/bearish/neutral
-                sentiment_signal = "NEUTRAL"
-                if weighted_sentiment >= 7.0:
-                    sentiment_signal = "BULLISH"
-                elif weighted_sentiment <= 4.0:
-                    sentiment_signal = "BEARISH"
+        # Get overall market sentiment if available
+        if hasattr(self, 'sentiment_tracker'):
+            try:
+                market_sentiment = self.sentiment_tracker.get_current_sentiment()
+                if market_sentiment:
+                    message += f"Market Sentiment: {self.escape_markdown(market_sentiment['status'])} "
+                    value = market_sentiment['value']
+                    message += f"\\({self.escape_markdown(f'{value:.1f}/10')}\\)\n"
 
-                # Determine if technical is bullish/bearish/neutral
-                technical_signal = "NEUTRAL"
-                if overall_bullish > overall_bearish * 1.5:
-                    technical_signal = "BULLISH"
-                elif overall_bearish > overall_bullish * 1.5:
-                    technical_signal = "BEARISH"
+                    # Add alignment with market sentiment
+                    if "BULLISH" in signal and "BULLISH" in market_sentiment['status'].upper():
+                        message += "✅ Trade aligned with overall market sentiment\n"
+                    elif "BEARISH" in signal and "BEARISH" in market_sentiment['status'].upper():
+                        message += "✅ Trade aligned with overall market sentiment\n"
+                    elif "BULLISH" in signal and "BEARISH" in market_sentiment['status'].upper():
+                        message += "⚠️ Trade against overall market sentiment - use caution\n"
+                    elif "BEARISH" in signal and "BULLISH" in market_sentiment['status'].upper():
+                        message += "⚠️ Trade against overall market sentiment - use caution\n"
+            except Exception as e:
+                logger.error(f"Error getting market sentiment: {e}")
 
-                # Combine signals
-                if sentiment_signal == technical_signal:
-                    # Strong signal when they align
-                    signal = sentiment_signal
-                    confidence = "high"
-                elif sentiment_signal != "NEUTRAL" and technical_signal != "NEUTRAL":
-                    # Conflicting signals
-                    signal = "MIXED"
-                    confidence = "low"
-                elif sentiment_signal != "NEUTRAL":
-                    # Sentiment-driven signal
-                    signal = sentiment_signal
-                    confidence = "medium"
-                elif technical_signal != "NEUTRAL":
-                    # Technically-driven signal
-                    signal = technical_signal
-                    confidence = "medium"
-            elif have_sentiment:
-                ticker_sentiment_value = ticker_sentiment['value']
-                # Only sentiment data available
-                if ticker_sentiment_value >= 7.0:
-                    signal = "BULLISH"
-                    confidence = "medium"
-                elif ticker_sentiment_value <= 4.0:
-                    signal = "BEARISH"
-                    confidence = "medium"
-            elif have_technical:
-                # Only technical data available
-                if overall_bullish > overall_bearish * 1.5:
-                    signal = "BULLISH"
-                    confidence = "medium"
-                elif overall_bearish > overall_bullish * 1.5:
-                    signal = "BEARISH"
-                    confidence = "medium"
+        # Get sector performance (this would need to be implemented)
+        # For now, we'll just add a placeholder
+        message += "Sector Performance: Not available in this version\n\n"
 
-            # Format confidence
-            confidence_display = "⭐⭐⭐" if confidence == "high" else "⭐⭐" if confidence == "medium" else "⭐"
+        # SECTION 10: CONCLUSION AND DISCLAIMER
+        message += "*CONCLUSION*\n"
 
-            # Display signal
-            message += f"• Signal: *{signal}*\n"
-            message += f"• Confidence: {confidence_display}\n\n"
-
-            # Add action recommendations
-            if signal == "BULLISH" and confidence in ["medium", "high"]:
-                message += "💡 *Recommended Action*: Consider buying or increasing long positions.\n"
-
-                # Add stop loss and target recommendations if price available
-                if current_price:
-                    stop_loss = current_price * 0.97  # 3% stop loss
-                    target = current_price * 1.06    # 6% target
-                    message += f"• Entry: ${current_price:.2f}\n"
-                    message += f"• Stop Loss: ${stop_loss:.2f}\n"
-                    message += f"• Target: ${target:.2f}\n"
-                    message += f"• Risk/Reward: 1:2\n"
-
-            elif signal == "BEARISH" and confidence in ["medium", "high"]:
-                message += "💡 *Recommended Action*: Consider reducing exposure or short positions.\n"
-
-                # Add stop loss and target recommendations if price available
-                if current_price:
-                    stop_loss = current_price * 1.03  # 3% stop loss for short
-                    target = current_price * 0.94    # 6% target for short
-                    message += f"• Entry: ${current_price:.2f}\n"
-                    message += f"• Stop Loss: ${stop_loss:.2f}\n"
-                    message += f"• Target: ${target:.2f}\n"
-                    message += f"• Risk/Reward: 1:2\n"
-
-            elif signal == "MIXED":
-                message += "💡 *Recommended Action*: Wait for clearer signals before taking a position.\n"
-                message += "• Monitor for alignment between sentiment and technical indicators.\n"
-
+        # Generate conclusion based on all the analysis
+        if signal == "BUY":
+            if confidence == "HIGH":
+                message += "Strong buy signal with high confidence\\. Multiple indicators aligned across technical, pattern, and sentiment analysis\n"
             else:
-                message += "💡 *Recommended Action*: No clear directional bias. Monitor for new signals.\n"
-
-        except Exception as e:
-            logger.error(f"Error generating combined signal: {e}")
-            message += "🎯 *Combined Trading Signal*\n• Error generating signal\n"
+                message += "Bullish bias with moderate confidence\\. Monitor price action and consider scaling in\n"
+        elif signal == "SELL":
+            if confidence == "HIGH":
+                message += "Strong sell signal with high confidence\\. Multiple indicators aligned across technical, pattern, and sentiment analysis\n"
+            else:
+                message += "Bearish bias with moderate confidence\\. Monitor price action and consider scaling in\n"
+        elif "Bullish" in signal:
+            message += "Early bullish bias developing\\. More confirmation needed before taking a position\n"
+        elif "Bearish" in signal:
+            message += "Early bearish bias developing. More confirmation needed before taking a position\n"
+        else:
+            message += "No clear directional bias at this time\\. Wait for better setup\n"
 
         # Add disclaimer
-        message += "\n⚠️ This is algorithmic analysis and not financial advice. Always do your own research."
+        message += "\n⚠️ *DISCLAIMER:* This analysis is generated algorithmically and should not be considered financial advice\\. Always conduct your own research and consider your risk tolerance before trading\\."
 
-        await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN)
+        # Send the message in smaller chunks if too long
+        if len(message) > 4000:
+            # Split the message into parts
+            parts = []
+            current_part = ""
+
+            for line in message.split('\n'):
+                if len(current_part) + len(line) + 1 > 4000:
+                    parts.append(current_part)
+                    current_part = line + '\n'
+                else:
+                    current_part += line + '\n'
+
+            if current_part:
+                parts.append(current_part)
+
+            # Send parts
+            for i, part in enumerate(parts):
+                part_header = f"ANALYSIS PART {i+1}/{len(parts)}\n\n" if i > 0 else ""
+                await update.message.reply_text(part_header + part, parse_mode=ParseMode.MARKDOWN_V2)
+        else:
+            await update.message.reply_text(message, parse_mode=ParseMode.MARKDOWN_V2)
 
     def _format_sentiment_meter(self, sentiment_data: Dict) -> str:
         """Format sentiment meter for display."""
