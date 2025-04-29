@@ -137,34 +137,35 @@ class NewsMonitor:
         return is_weekday and is_work_hours
 
     async def monitor(self):
+        pass
         """Main monitoring loop to check for and process new headlines."""
-        interval_seconds = self.config.get('news_collector.interval_seconds', 30)
-
-        logger.info(f"Starting news monitoring. Checking every {interval_seconds} seconds during weekdays (Monday-Friday) from 8 AM to 3 PM...")
-
-        try:
-            while not getattr(self, 'should_stop', False):
-                if self.is_business_hours():
-                    new_headlines = self.get_new_headlines()
-
-                    if new_headlines:
-                        logger.info(f"Found {len(new_headlines)} new headlines!")
-                        await self.process_headlines(new_headlines)
-                    else:
-                        logger.info("No new headlines found.")
-                    await asyncio.sleep(interval_seconds)
-                else:
-                    current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    logger.info(f"Outside business hours at {current_time}. Waiting...")
-                    # Check more frequently to allow for graceful shutdown
-                    await asyncio.sleep(300)
-        except asyncio.CancelledError:
-            logger.info("News monitor task cancelled")
-            # Re-raise to properly handle cancellation
-            raise
-        except Exception as e:
-            logger.error(f"Unexpected error in monitoring loop: {e}")
-            raise
+        # interval_seconds = self.config.get('news_collector.interval_seconds', 30)
+        #
+        # logger.info(f"Starting news monitoring. Checking every {interval_seconds} seconds during weekdays (Monday-Friday) from 8 AM to 3 PM...")
+        #
+        # try:
+        #     while not getattr(self, 'should_stop', False):
+        #         if self.is_business_hours():
+        #             new_headlines = self.get_new_headlines()
+        #
+        #             if new_headlines:
+        #                 logger.info(f"Found {len(new_headlines)} new headlines!")
+        #                 await self.process_headlines(new_headlines)
+        #             else:
+        #                 logger.info("No new headlines found.")
+        #             await asyncio.sleep(interval_seconds)
+        #         else:
+        #             current_time = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        #             logger.info(f"Outside business hours at {current_time}. Waiting...")
+        #             # Check more frequently to allow for graceful shutdown
+        #             await asyncio.sleep(300)
+        # except asyncio.CancelledError:
+        #     logger.info("News monitor task cancelled")
+        #     # Re-raise to properly handle cancellation
+        #     raise
+        # except Exception as e:
+        #     logger.error(f"Unexpected error in monitoring loop: {e}")
+        #     raise
 
     def stop(self):
         """Signal the monitor to stop."""
