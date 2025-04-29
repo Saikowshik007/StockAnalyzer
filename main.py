@@ -3,9 +3,10 @@ import logging
 import os
 import threading
 import time
+import traceback
 
 from collectors.news_collector import NewsMonitor
-from collectors.stock_collector import YahooMultiStockCollector  # Updated import
+from collectors.stock_collector import YahooMultiStockCollector
 from database.db_manager import DatabaseManager
 from services.bot_service import TelegramBot
 from services.pattern_monitor import TalibPatternMonitor
@@ -82,15 +83,16 @@ class FinancialMonitorApp:
         self.shutdown_event = threading.Event()
         self.tasks = []
 
+        # Create event loops for async threads
+        self.news_loop = None
+        self.bot_loop = None
+
     def _initialize_watchlist(self):
         """Initialize the watchlist with default tickers from config."""
         default_watchlist = self.config.get('stock_collector.default_watchlist', [])
         for ticker in default_watchlist:
             self.db_manager.add_to_watchlist(ticker)
             self.stock_collector.add_stock(ticker)
-
-    # Remove the run_stock_collector and _start_stock_collector_with_new_loop methods
-    # since we no longer need WebSocket connectivity with yfinance
 
     def run_stock_data_saver(self):
         """Periodically save stock data to database for all timeframes."""
@@ -139,6 +141,7 @@ class FinancialMonitorApp:
             loop.run_until_complete(self.pattern_monitor.monitor_patterns())
         except Exception as e:
             logger.error(f"Error in pattern monitor: {e}")
+            logger.error(traceback.format_exc())
 
     def run_sentiment_tracker(self):
         """Run periodic sentiment updates."""
@@ -173,6 +176,36 @@ class FinancialMonitorApp:
                 logger.error(f"Error in data refresher: {e}")
                 time.sleep(60)  # Wait 1 minute and try again
 
+    def run_news_monitor(self):
+        """Run the news monitoring loop in a dedicated thread."""
+        self.news_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.news_loop)
+
+        try:
+            logger.info("Starting news monitor...")
+            self.news_loop.run_until_complete(self.news_monitor.monitor())
+        except Exception as e:
+            logger.error(f"Error in news monitor thread: {e}")
+            logger.error(traceback.format_exc())
+        finally:
+            self.news_loop.close()
+            logger.info("News monitor thread stopped")
+
+    def run_telegram_bot(self):
+        """Run the Telegram bot in a dedicated thread."""
+        self.bot_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.bot_loop)
+
+        try:
+            logger.info("Starting Telegram bot...")
+            self.bot_loop.run_until_complete(self.bot.run_async())
+        except Exception as e:
+            logger.error(f"Error in Telegram bot thread: {e}")
+            logger.error(traceback.format_exc())
+        finally:
+            self.bot_loop.close()
+            logger.info("Telegram bot thread stopped")
+
     async def run(self):
         """Main application runner."""
         try:
@@ -192,33 +225,45 @@ class FinancialMonitorApp:
             logger.info("Stock data initialized")
 
             # Start stock data saver in a separate thread
+            logger.info("Starting stock data saver thread...")
             saver_thread = threading.Thread(target=self.run_stock_data_saver, daemon=True)
             saver_thread.start()
 
             # Start pattern monitor in a separate thread
+            logger.info("Starting pattern monitor thread...")
             pattern_thread = threading.Thread(target=self.run_pattern_monitor, daemon=True)
             pattern_thread.start()
 
             # Start sentiment tracker in a separate thread
+            logger.info("Starting sentiment tracker thread...")
             sentiment_thread = threading.Thread(target=self.run_sentiment_tracker, daemon=True)
             sentiment_thread.start()
 
             # Start data refresher in a separate thread
+            logger.info("Starting data refresher thread...")
             refresher_thread = threading.Thread(target=self.run_data_refresher, daemon=True)
             refresher_thread.start()
 
-            # Create tasks for async components
-            news_task = asyncio.create_task(self.news_monitor.monitor())
-            bot_task = asyncio.create_task(self.bot.run_async())
-            self.tasks = [news_task, bot_task]
+            # Start news monitor in a separate thread
+            logger.info("Starting news monitor thread...")
+            news_thread = threading.Thread(target=self.run_news_monitor, daemon=True)
+            news_thread.start()
 
-            # Wait for tasks to complete
-            await asyncio.gather(*self.tasks)
+            # Start Telegram bot in a separate thread
+            logger.info("Starting Telegram bot thread...")
+            bot_thread = threading.Thread(target=self.run_telegram_bot, daemon=True)
+            bot_thread.start()
+
+            # Main application loop - keep the main thread alive
+            logger.info("All components started successfully!")
+            while not self.shutdown_event.is_set():
+                await asyncio.sleep(1)
 
         except asyncio.CancelledError:
             logger.info("Tasks cancelled during shutdown")
         except Exception as e:
             logger.error(f"Application error: {e}")
+            logger.error(traceback.format_exc())
             # Re-raise the exception to ensure it's properly handled
             raise
         finally:
@@ -230,7 +275,8 @@ class FinancialMonitorApp:
 
         # Signal components to stop
         self.shutdown_event.set()
-        self.news_monitor.stop()
+        if hasattr(self, 'news_monitor'):
+            self.news_monitor.stop()
 
         # Close stock collector resources
         if hasattr(self, 'stock_collector'):
@@ -239,20 +285,19 @@ class FinancialMonitorApp:
             logger.info("Stock collector closed")
 
         # Give a moment for threads to process the shutdown event
-        await asyncio.sleep(1)
+        await asyncio.sleep(2)
 
         # Cancel all running tasks
-        for task in self.tasks:
-            if not task.done():
-                logger.info(f"Cancelling task: {task}")
+        if self.news_loop and self.news_loop.is_running():
+            for task in asyncio.all_tasks(self.news_loop):
                 task.cancel()
 
-        # Wait for tasks to be cancelled
-        if self.tasks:
-            await asyncio.gather(*self.tasks, return_exceptions=True)
+        if self.bot_loop and self.bot_loop.is_running():
+            for task in asyncio.all_tasks(self.bot_loop):
+                task.cancel()
 
         # Give threads time to shutdown
-        await asyncio.sleep(1)
+        await asyncio.sleep(2)
 
         # Final backup
         self.db_manager.backup_database()
@@ -270,8 +315,7 @@ def main():
         logger.info("Received keyboard interrupt")
     except Exception as e:
         logger.error(f"Failed to start application: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(traceback.format_exc())
     finally:
         logger.info("Application shutdown complete")
 
